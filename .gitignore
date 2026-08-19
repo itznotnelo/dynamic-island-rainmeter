@@ -1,0 +1,5 @@
+# Runtime-generated files - written by NowPlaying.ps1 on first run,
+# not part of the source.
+@Resources/NowPlaying.inc
+@Resources/EventState.json
+@Resources/SourceIcon.png

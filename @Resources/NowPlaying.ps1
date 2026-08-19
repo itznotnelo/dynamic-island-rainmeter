@@ -1,0 +1,270 @@
+# Dynamic Island - Windows system poller
+# Run periodically by Rainmeter (Plugin=RunCommand). Reports now-playing
+# media (via SMTC), battery status, and mic/camera privacy indicators - no
+# API keys, no browser extension, no extra installs.
+# Writes NowPlaying.inc for the skin to read via a WebParser file:// measure.
+#
+# Note: live per-track cover-art was attempted via the SMTC Thumbnail
+# stream but hits a confirmed Windows PowerShell 5.1 WinRT interop
+# limitation (the IRandomAccessStream COM object isn't properly projected
+# for property/method access in this environment, and a compiled C# helper
+# hit missing Windows SDK metadata dependencies - Title/Artist/timeline all
+# read fine, only the stream interfaces fail). Instead, this shows the
+# SOURCE APP's icon (e.g. Spotify, or the browser playing a video) via
+# ordinary System.Drawing icon extraction - not the exact track art, but a
+# real image, no extra installs needed.
+#
+# Battery/privacy both use classic WMI/registry (not WinRT) and are
+# reliable in this environment, unlike the thumbnail stream above.
+#
+# Usage: NowPlaying.ps1 [-Action Status|PlayPause|Next|Previous]
+
+param(
+    [ValidateSet('Status', 'PlayPause', 'Next', 'Previous')]
+    [string]$Action = 'Status'
+)
+
+$ErrorActionPreference = 'Stop'
+$here       = Split-Path -Parent $MyInvocation.MyCommand.Path
+$outInc     = Join-Path $here 'NowPlaying.inc'
+$iconPath   = Join-Path $here 'SourceIcon.png'
+$statePath  = Join-Path $here 'EventState.json'
+
+# === Now-playing icon (unchanged from before) ===
+
+function Save-SourceIcon {
+    param([string]$AppUserModelId)
+
+    $exePath = $null
+    if ($AppUserModelId -and $AppUserModelId -like '*.exe' -and (Test-Path $AppUserModelId -ErrorAction SilentlyContinue)) {
+        $exePath = $AppUserModelId
+    } else {
+        foreach ($name in @('Spotify', 'vlc', 'msedge', 'chrome', 'firefox')) {
+            $p = Get-Process -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($p -and $p.Path) { $exePath = $p.Path; break }
+        }
+    }
+    if (-not $exePath) { return }
+
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+        $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exePath)
+        if ($icon) {
+            $bmp = $icon.ToBitmap()
+            $bmp.Save($iconPath, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+            $icon.Dispose()
+        }
+    } catch { }
+}
+
+# === Battery (WMI, confirmed reliable) ===
+
+function Get-BatteryInfo {
+    $battery = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $battery) {
+        return @{ Percent = -1; Charging = 0; Status = -1 }
+    }
+    # Charging (for the bolt icon) = actively charging. Status is the raw
+    # BatteryStatus code, used separately to detect ANY AC power transition -
+    # plugging in a nearly-full battery reports Status 2 ("on AC, not
+    # actively charging"), not 6-9, so Charging alone misses that event.
+    $charging = [int]($battery.BatteryStatus -in @(6, 7, 8, 9))
+    return @{ Percent = [int]$battery.EstimatedChargeRemaining; Charging = $charging; Status = [int]$battery.BatteryStatus }
+}
+
+# === Mic/camera privacy (registry, confirmed reliable) ===
+
+function Test-CapabilityActive {
+    param([string]$Capability)
+    $basePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\$Capability"
+    if (-not (Test-Path $basePath)) { return $false }
+
+    foreach ($k in Get-ChildItem $basePath -ErrorAction SilentlyContinue) {
+        if ($k.PSChildName -eq 'NonPackaged') {
+            foreach ($sk in Get-ChildItem $k.PSPath -ErrorAction SilentlyContinue) {
+                $stop = (Get-ItemProperty -Path $sk.PSPath -Name LastUsedTimeStop -ErrorAction SilentlyContinue).LastUsedTimeStop
+                if ($null -ne $stop -and $stop -eq 0) { return $true }
+            }
+        } else {
+            $stop = (Get-ItemProperty -Path $k.PSPath -Name LastUsedTimeStop -ErrorAction SilentlyContinue).LastUsedTimeStop
+            if ($null -ne $stop -and $stop -eq 0) { return $true }
+        }
+    }
+    return $false
+}
+
+# === Event decay: "recently changed" window for the battery HUD ===
+# Event 2 = AC plug/unplug (any BatteryStatus change). Event 3 = battery
+# dropped below the low-battery threshold while unplugged. Event 4 = battery
+# dropped below the critical threshold while unplugged (checked first, so it
+# wins if a poll ever sees a jump straight past both bands). Each tier has
+# its own latch so it fires once per discharge episode rather than every
+# poll - both reset once you charge back up past the hysteresis margin or
+# plug in, so a later drop below either threshold warns again.
+
+$lowBatteryThreshold = 20
+$criticalBatteryThreshold = 10
+$lowBatteryResetAbove = 25
+
+function Get-EventCode {
+    param([int]$CurrentStatus, [int]$CurrentPercent, [int]$CurrentCharging)
+
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $prev = $null
+    if (Test-Path $statePath) {
+        try { $prev = Get-Content $statePath -Raw | ConvertFrom-Json } catch { $prev = $null }
+    }
+
+    if (-not $prev) {
+        $state = @{ LastStatus = $CurrentStatus; ChangeAt = 0; ChangeType = 0; LowBatteryWarned = $false; CriticalBatteryWarned = $false }
+    } else {
+        $lastStatus = if ($null -ne $prev.LastStatus) { $prev.LastStatus } else { $prev.LastCharging }
+        $lowBatteryWarned = if ($null -ne $prev.LowBatteryWarned) { $prev.LowBatteryWarned } else { $false }
+        $criticalBatteryWarned = if ($null -ne $prev.CriticalBatteryWarned) { $prev.CriticalBatteryWarned } else { $false }
+        $state = @{ LastStatus = $lastStatus; ChangeAt = $prev.ChangeAt; ChangeType = $prev.ChangeType; LowBatteryWarned = $lowBatteryWarned; CriticalBatteryWarned = $criticalBatteryWarned }
+    }
+
+    $fired = $false
+
+    # Any change in the raw BatteryStatus code means an AC power transition
+    # happened (plug in, unplug, or a charging-state shift) - not just the
+    # narrower "actively charging" cases.
+    if ($CurrentStatus -ne $state.LastStatus -and $CurrentStatus -ge 0 -and $state.LastStatus -ge 0) {
+        $state.ChangeAt = $nowMs
+        $state.ChangeType = 2
+        $fired = $true
+    }
+
+    if (-not $fired -and $CurrentPercent -ge 0 -and $CurrentPercent -le $criticalBatteryThreshold `
+            -and $CurrentCharging -eq 0 -and -not $state.CriticalBatteryWarned) {
+        $state.ChangeAt = $nowMs
+        $state.ChangeType = 4
+        $state.CriticalBatteryWarned = $true
+        $state.LowBatteryWarned = $true
+        $fired = $true
+    }
+
+    if (-not $fired -and $CurrentPercent -ge 0 -and $CurrentPercent -le $lowBatteryThreshold `
+            -and $CurrentCharging -eq 0 -and -not $state.LowBatteryWarned) {
+        $state.ChangeAt = $nowMs
+        $state.ChangeType = 3
+        $state.LowBatteryWarned = $true
+        $fired = $true
+    }
+
+    if ($CurrentPercent -gt $lowBatteryResetAbove -or $CurrentCharging -eq 1) {
+        $state.LowBatteryWarned = $false
+        $state.CriticalBatteryWarned = $false
+    }
+
+    $state.LastStatus = $CurrentStatus
+    ($state | ConvertTo-Json) | Set-Content -Path $statePath -Encoding utf8
+
+    if ($state.ChangeAt -gt 0 -and ($nowMs - $state.ChangeAt) -lt 8000) {
+        return $state.ChangeType
+    }
+    return 0
+}
+
+# === Output ===
+
+function Write-NowPlaying {
+    param(
+        [string]$Track = '',
+        [string]$Artist = '',
+        [int]$IsPlaying = 0,
+        [long]$ProgressMs = 0,
+        [long]$DurationMs = 0,
+        [int]$BatteryPercent = -1,
+        [int]$BatteryCharging = 0,
+        [int]$MicActive = 0,
+        [int]$CamActive = 0,
+        [int]$EventCode = 0
+    )
+    @(
+        "Track=$Track"
+        "Artist=$Artist"
+        "IsPlaying=$IsPlaying"
+        "ProgressMs=$ProgressMs"
+        "DurationMs=$DurationMs"
+        "Volume=0"
+        "BatteryPercent=$BatteryPercent"
+        "BatteryCharging=$BatteryCharging"
+        "MicActive=$MicActive"
+        "CamActive=$CamActive"
+        "Event=$EventCode"
+    ) | Set-Content -Path $outInc -Encoding utf8
+}
+
+# === Gather system state (independent of media session) ===
+
+$batteryInfo = Get-BatteryInfo
+$micActive = [int](Test-CapabilityActive -Capability 'microphone')
+$camActive = [int](Test-CapabilityActive -Capability 'webcam')
+$eventCode = Get-EventCode -CurrentStatus $batteryInfo.Status -CurrentPercent $batteryInfo.Percent -CurrentCharging $batteryInfo.Charging
+
+# === SMTC now-playing (independent of the above) ===
+
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+[Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime] | Out-Null
+
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+})[0]
+
+function Wait-WinRT($WinRtOperation, [type]$ResultType) {
+    $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+    $task = $asTask.Invoke($null, @($WinRtOperation))
+    $task.Wait(3000) | Out-Null
+    return $task.Result
+}
+
+$commonArgs = @{
+    BatteryPercent = $batteryInfo.Percent; BatteryCharging = $batteryInfo.Charging
+    MicActive = $micActive; CamActive = $camActive; EventCode = $eventCode
+}
+
+try {
+    $sessionManager = Wait-WinRT ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) `
+        ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+    $session = $sessionManager.GetCurrentSession()
+} catch {
+    Write-NowPlaying @commonArgs
+    return
+}
+
+if (-not $session) {
+    Write-NowPlaying @commonArgs
+    return
+}
+
+if ($Action -ne 'Status') {
+    try {
+        switch ($Action) {
+            'PlayPause' { $session.TryTogglePlayPauseAsync() | Out-Null }
+            'Next'      { $session.TrySkipNextAsync() | Out-Null }
+            'Previous'  { $session.TrySkipPreviousAsync() | Out-Null }
+        }
+        Start-Sleep -Milliseconds 300
+    } catch { }
+}
+
+try {
+    $props = Wait-WinRT ($session.TryGetMediaPropertiesAsync()) `
+        ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+    $playbackInfo = $session.GetPlaybackInfo()
+    $timeline = $session.GetTimelineProperties()
+
+    $isPlaying = [int]($playbackInfo.PlaybackStatus.ToString() -eq 'Playing')
+    $positionMs = [long]$timeline.Position.TotalMilliseconds
+    $durationMs = [long]($timeline.EndTime - $timeline.StartTime).TotalMilliseconds
+
+    Save-SourceIcon -AppUserModelId $session.SourceAppUserModelId
+
+    Write-NowPlaying @commonArgs -Track $props.Title -Artist $props.Artist -IsPlaying $isPlaying `
+        -ProgressMs $positionMs -DurationMs $durationMs
+} catch {
+    Write-NowPlaying @commonArgs
+}
+

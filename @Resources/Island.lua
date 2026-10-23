@@ -5,10 +5,10 @@
 -- springs and fades, and hands the results to the meters as variables.
 
 local DT = 0.016
-local CX = 200            -- pill centre inside the skin window
+local CX = 270            -- pill centre inside the skin window (read from the skin)
 local CLOCK_W = 124       -- idle width (Bloom: 140, minus 16 for the 24 h clock)
 local SLOT = 30           -- visualizer / album art slot
-local R = 18              -- bottom corner radius
+local R = 18              -- bottom corner radius (the calendar panel uses 28)
 local FLARE = 13          -- concave shoulders where the notch meets the screen edge
 
 local WEIGHTS = { 1.2, 1.2, 1.5, 2.8, 5 }
@@ -17,6 +17,9 @@ local MODE_RGB = {
   Auto = '255,193,7', Bypass = '255,107,128',
 }
 local GREEN, RED, ORANGE = '50,215,75', '255,69,58', '255,159,10'
+local MONTHS = { 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+  'September', 'October', 'November', 'December' }
+local CHIME = [[C:\Windows\Media\Alarm01.wav]]
 
 -- Spring with framer-motion constants (stiffness, damping, mass), 4 substeps per frame
 local Spring = {}
@@ -52,8 +55,10 @@ local t = 0
 
 function Initialize()
   DT = (tonumber(SKIN:GetVariable('UpdateMs')) or 16) / 1000
+  CX = tonumber(SKIN:GetVariable('CX')) or CX
   S.w = Spring.new(400, 31, 1, CLOCK_W)
   S.h = Spring.new(450, 29, 1, 36)
+  S.r = Spring.new(1000, 40, 1, R)
   S.bg = Fade.new(0.3)                         -- hover/expanded darkening
   S.mute = Fade.new(0.2)                       -- clock dims on hover
   S.vis = Fade.new(0.2)                        -- compact visualizer slot
@@ -73,16 +78,51 @@ function Initialize()
   S.spin = 0
   S.mq = 0
   S.lastClaude, S.lastBattery = nil, 0
-  S.hover, S.expanded = false, false
+  S.hover, S.open = false, false
+  S.panel, S.lastPanel, S.scrollAt = 'calendar', 'calendar', -1
+  S.timer = { dur = 25 * 60, left = 0, running = false, endAt = 0, finished = false }
+  S.calKey = ''
 end
 
--- Mouse, called from the skin with !CommandMeasure
+-- Mouse, called from the skin with !CommandMeasure (Bloom's triggers)
 function Hover(on)
   S.hover = on == 1
-  if not S.hover then S.expanded = false end    -- Bloom closes as soon as the mouse leaves
+  if not S.hover then S.open = false end        -- Bloom closes as soon as the mouse leaves
 end
-function Click()
-  if S.hasMusic then S.expanded = not S.expanded end
+local function openPanel(panel)
+  S.open, S.panel, S.lastPanel = true, panel, panel
+end
+function Click()                                -- the notch: the last panel, else the calendar
+  if not S.open then openPanel(S.lastPanel == 'music' and S.hasMusic and 'music' or 'calendar') end
+end
+function ClickArt()                             -- the album art: the player
+  openPanel('music')
+end
+function Scroll()                               -- wheel: opens the calendar, then calendar <-> player
+  if t - S.scrollAt < 0.25 then return end
+  S.scrollAt = t
+  if not S.open then openPanel('calendar')
+  elseif S.hasMusic then openPanel(S.panel == 'music' and 'calendar' or 'music') end
+end
+
+-- Focus timer in the calendar panel: presets 5/15/25/50 min, Start/Pause/Resume/Restart, reset
+function TimerPreset(mins)
+  local T = S.timer
+  T.dur, T.left, T.running, T.finished = mins * 60, mins * 60, true, false
+  T.endAt = os.time() + T.left
+end
+function TimerPrimary()
+  local T = S.timer
+  if T.running then
+    T.left, T.running = math.max(0, T.endAt - os.time()), false
+  elseif T.left > 0 then
+    T.endAt, T.running = os.time() + T.left, true
+  else
+    TimerPreset(T.dur / 60)
+  end
+end
+function TimerReset()
+  S.timer.running, S.timer.left, S.timer.finished = false, 0, false
 end
 
 local dirty = true        -- meters only redraw when something changed (they have UpdateDivider=-1)
@@ -94,12 +134,22 @@ local function set(name, value)
     SKIN:Bang('!SetVariable', name, value)
   end
 end
+-- clickable meters are shown only while their view is visible (see the skin)
+local shown = {}
+local function showGroup(name, on)
+  if shown[name] ~= on then
+    shown[name] = on
+    dirty = true
+    SKIN:Bang(on and '!ShowMeterGroup' or '!HideMeterGroup', name)
+  end
+end
 local function str(m) return SKIN:GetMeasure(m):GetStringValue() end
 local function num(m) return SKIN:GetMeasure(m):GetValue() end
 local function alpha(a) return string.format('%d', math.floor(math.max(0, math.min(1, a)) * 255 + 0.5)) end
 
-local function pillPath(w, h)
+local function pillPath(w, h, r)
   local L, Rt = CX - w / 2, CX + w / 2
+  local R = math.min(r, h - FLARE)            -- corners never climb into the shoulders
   local k = 0.5523 * R
   local f = '%.2f'
   local function p(x, y) return string.format(f .. ',' .. f, x, y) end
@@ -133,6 +183,40 @@ end
 
 local function pushPulse(text, rgb, secs)
   if text and text ~= '' then table.insert(S.pulses, { text = text, rgb = rgb, t = secs }) end
+end
+
+local function tickTimer()
+  local T = S.timer
+  if not T.running then return end
+  T.left = T.endAt - os.time()
+  if T.left <= 0 then
+    T.running, T.left, T.finished = false, 0, true
+    pushPulse("Time's up", RED, 6)
+    SKIN:Bang('[Play "' .. CHIME .. '"]')
+  end
+end
+
+-- this month, Sunday first like Bloom; returns the number of week rows (5 or 6)
+local function calendar()
+  local now = os.date('*t')
+  local key = now.year .. '-' .. now.month .. '-' .. now.day
+  if key ~= S.calKey then
+    S.calKey = key
+    local first = os.date('*t', os.time({ year = now.year, month = now.month, day = 1, hour = 12 }))
+    local days = os.date('*t', os.time({ year = now.year, month = now.month + 1, day = 0, hour = 12 })).day
+    local start = first.wday - 1
+    set('CalTitle', MONTHS[now.month] .. ' ' .. now.year)
+    for i = 1, 42 do
+      local d = i - start
+      set('D' .. i, (d >= 1 and d <= days and d ~= now.day) and tostring(d) or '')
+    end
+    local ti = start + now.day - 1
+    set('TodayCol', ti % 7)
+    set('TodayRow', math.floor(ti / 7))
+    set('TodayText', tostring(now.day))
+    S.calRows = math.ceil((start + days) / 7)
+  end
+  return S.calRows
 end
 
 local function readEvents()
@@ -173,7 +257,8 @@ end
 -- true when nothing is moving: then a frame with unchanged inputs can be skipped entirely
 local function settled()
   if #S.pulses > 0 or S.layer.cur ~= S.layer.want or (S.layer.a ~= 0 and S.layer.a ~= 1) then return false end
-  for _, s in ipairs({ S.w, S.h, S.bubble, S.bars[1], S.bars[2], S.bars[3], S.bars[4], S.bars[5] }) do
+  if S.timer.running then return false end
+  for _, s in ipairs({ S.w, S.h, S.r, S.bubble, S.bars[1], S.bars[2], S.bars[3], S.bars[4], S.bars[5] }) do
     if s.x ~= s.to or s.v ~= 0 then return false end
   end
   for _, f in ipairs({ S.bg, S.mute, S.vis, S.art, S.small, S.glow, S.bubbleA }) do
@@ -192,14 +277,15 @@ function Update()
   S.hasMusic = track ~= ''
   if playing then S.paused = 0 else S.paused = S.paused + dt end
   local compact = S.hasMusic and (playing or S.paused < 5)
-  if not S.hasMusic then S.expanded = false end
+  tickTimer()
+  local T = S.timer
 
   -- fast path: all at rest and nothing new since last frame (most frames when idle)
   local cs = num('MeasureClaudeState')
   local sig = table.concat({ track, str('MeasureArtist'), tostring(playing), tostring(compact),
     str('MeasureCover'), str('MeasureClock'), cs, str('MeasureClaudeMode'), str('MeasureClaudeEventAt'),
     num('MeasureEvent'), num('MeasureMicActive'), num('MeasureCamActive'), num('MeasureVolume'),
-    tostring(S.hover), tostring(S.expanded),
+    tostring(S.hover), tostring(S.open), S.panel, T.left, tostring(T.running), tostring(T.finished),
     cs == 1 and math.floor(t / 0.25) or cs == 2 and math.floor(t / 0.5) or 0 }, '|')
   if sig == S.sig and S.rest then return 0 end
   S.sig = sig
@@ -208,8 +294,11 @@ function Update()
   -- what the island should be
   local pulse = S.pulses[1]
   local want, w, h
-  if S.expanded then
+  local r = R
+  if S.open and S.panel == 'music' and S.hasMusic then
     want, w, h = 'expanded', 340, 120
+  elseif S.open then
+    want, w, h, r = 'calendar', 480, calendar() == 6 and 305 or 273, 28
   elseif pulse and not S.hover then
     want, w, h = 'pulse', 200, 36
     pulse.t = pulse.t - dt
@@ -219,9 +308,10 @@ function Update()
     w = CLOCK_W + (compact and SLOT or 0) + (compact and playing and SLOT or 0)
   end
   S.layer.want = want
-  S.w.to, S.h.to = w, h
+  S.w.to, S.h.to, S.r.to = w, h, r
   S.w:step(dt)
   S.h:step(dt)
+  S.r:step(dt)
 
   -- content swap like AnimatePresence "wait": old layer fades out in 0.1 s, then the new one in
   local L = S.layer
@@ -234,11 +324,15 @@ function Update()
   local rowA = L.cur == 'row' and L.a or 0
   local expA = L.cur == 'expanded' and L.a or 0
   local pulseA = L.cur == 'pulse' and L.a or 0
+  local calA = L.cur == 'calendar' and L.a or 0
+  -- the clock row stays while the calendar opens or closes below it
+  local function withClock(x) return x == 'row' or x == 'calendar' end
+  local clockA = withClock(L.cur) and (withClock(L.want) and 1 or L.a) or 0
 
-  S.bg.to = (S.hover or S.expanded) and 1 or 0
-  S.mute.to = (S.hover and not S.expanded) and 1 or 0
-  S.vis.to = (compact and playing) and 1 or 0
-  S.art.to = compact and 1 or 0
+  S.bg.to = (S.hover or S.open) and 1 or 0
+  S.mute.to = (S.hover and not S.open) and 1 or 0
+  S.vis.to = (compact and playing and not S.open) and 1 or 0
+  S.art.to = (compact and not S.open) and 1 or 0
   S.small.to = playing and 0 or 1
   S.glow.to = L.cur == 'expanded' and 1 or 0
   for _, f in ipairs({ S.bg, S.mute, S.vis, S.art, S.small, S.glow }) do f:step(dt) end
@@ -246,7 +340,7 @@ function Update()
 
   local W, H = S.w.x, S.h.x
   local left = CX - W / 2
-  set('PillPath', pillPath(W, H))
+  set('PillPath', pillPath(W, H, S.r.x))
   local cover = str('MeasureCover')
   set('Art', cover ~= '' and cover or 'Blank')   -- file slot written by cover.py
   set('bgA', alpha(0.80 + 0.12 * ease(S.bg.x)))
@@ -257,11 +351,15 @@ function Update()
   -- row: [visualizer] clock [art]
   local visSlot, artSlot = SLOT * S.vis.x, SLOT * S.art.x
   set('ClockX', left + visSlot + (W - visSlot - artSlot) / 2)
-  set('ClockA', alpha(rowA * (1 - 0.4 * ease(S.mute.x))))
+  set('ClockA', alpha(clockA * (1 - 0.4 * ease(S.mute.x))))
+  local timing = T.running or T.left > 0          -- a running or paused timer replaces the clock
+  set('ClockText', timing and string.format('%02d:%02d', math.floor(T.left / 60), T.left % 60)
+    or str('MeasureClock'))
   set('VisA', alpha(rowA * S.vis.x * 0.95))
   local artSize = 24 - 4 * ease(S.small.x)
   local artScale = (0.8 + 0.2 * S.art.x) * artSize / 24
   set('ArtSA', alpha(rowA * S.art.x))
+  showGroup('ArtS', rowA * S.art.x > 0)
   set('ArtSSize', 56 * artScale)
   set('ArtSX', left + W - 12 - 12 - 28 * artScale)
   set('ArtSY', 18 - 28 * artScale)
@@ -288,6 +386,7 @@ function Update()
   set('ExpVisA', alpha(expA * (playing and 0.8 or 0.5)))
   set('GlowA', alpha(ease(S.glow.x)))     -- the 0.85 opacity is baked into the glow image
   set('HitA', expA > 0.5 and '1' or '0')
+  showGroup('Player', expA > 0)
   set('PlayA', alpha(expA * (playing and 0 or 1)))
   set('PauseA', alpha(expA * (playing and 1 or 0)))
   local colW = W - 130 - 12
@@ -304,8 +403,43 @@ function Update()
   S.marqueeOn = L.cur == 'expanded' and overflow > 1
   set('TitleX', -marquee(S.marqueeOn and overflow or 0, dt))
 
+  -- calendar panel (480 x 273/305): month on the left, focus timer on the right
+  set('CalA', alpha(calA))
+  set('CalTitleA', alpha(calA * 0.9))
+  set('CalNameA', alpha(calA * 0.4))
+  set('CalLineA', alpha(calA * 0.1))
+  set('HitCal', calA > 0.5 and '1' or '0')
+  showGroup('Timer', calA > 0)
+  local paused = not T.running and T.left > 0
+  local shown = (T.left > 0 or T.finished) and T.left or T.dur
+  local mm, ss = string.format('%02d', math.floor(shown / 60)), string.format('%02d', shown % 60)
+  set('TimM1', mm:sub(1, 1)) set('TimM2', mm:sub(2, 2))
+  set('TimS1', ss:sub(1, 1)) set('TimS2', ss:sub(2, 2))
+  set('TimRGB', T.finished and RED or '255,255,255')
+  set('TimA', alpha(calA * (paused and 0.55 or 1)))
+  set('TimColonA', alpha(calA * 0.3))
+  set('TimStatusA', alpha(calA * (T.finished and 0.9 or 0.4)))
+  set('TimStatus', T.running and ('ends ' .. os.date('%H:%M', T.endAt))
+    or paused and ('Paused, ends ' .. os.date('%H:%M', os.time() + T.left))
+    or T.finished and "Time's up" or '')
+  set('TimLabel', T.running and 'Pause' or paused and 'Resume' or T.finished and 'Restart' or 'Start')
+  set('TimBtnA', alpha(calA))
+  set('PlayIconA', alpha(calA * (T.running and 0 or 1)))
+  set('PauseIconA', alpha(calA * (T.running and 1 or 0)))
+  local label = SKIN:GetMeter('MeterTimLabel')
+  local gw = 14 + 7 + (label and label:GetW() or 30)
+  set('TimIconX', left + 374.3 - gw / 2)
+  set('TimLabelX', left + 374.3 - gw / 2 + 21)
+  set('ResetA', alpha(calA * ((T.left > 0 or T.finished) and 0.35 or 0.08)))
+  for k, mins in ipairs({ 5, 15, 25, 50 }) do
+    local on = T.dur == mins * 60 and not T.finished
+    set('Pre' .. k .. 'A', alpha(calA * (on and 1 or 0.5)))
+    set('Pre' .. k .. 'Bg', alpha(calA * (on and 0.12 or 0)))
+  end
+  set('TimTop', 52 + ((H - 68) - 180) / 2)
+
   -- Claude bubble beside the pill (Bloom's live-activity bubble: 30x30, r10, 8 px gap)
-  local active = cs > 0 and not S.expanded
+  local active = cs > 0 and not S.open
   S.bubble.to = active and 1 or 0
   S.bubbleA.to = active and 1 or 0
   S.bubble:step(dt)
@@ -324,7 +458,6 @@ function Update()
   set('SparkA', alpha(S.bubbleA.x * sparkA))
 
   -- text the meters show straight from measures
-  set('_clock', str('MeasureClock'))
   set('_track', track)
   set('_artist', str('MeasureArtist'))
 

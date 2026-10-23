@@ -12,13 +12,15 @@ Sehajveer Singh: the same sizes, colours, font and spring physics, rebuilt from 
 | | |
 |---|---|
 | ![Black notch with the time](screenshot.png) | **Idle.** A 124x36 black notch with the clock, curving into the screen edge. |
-| | **Hover.** The notch widens and shows the weather on the left and your next to-do on the right (a red box when it's overdue), like Bloom's status view. |
+| | **Hover.** The notch widens and shows the weather on the left and your next to-do on the right (a red box when it's overdue), like Bloom's status view. When a shift or class starts within the hour and a half, the bus to catch replaces the weather, and ten minutes before it leaves a pulse reminds you. |
 | ![Notch with visualizer, time and album cover](screenshot-now-playing.png) | **Music.** A 5-bar visualizer that reacts to what you hear, and the album cover with a soft glow. Five seconds after you pause, it goes back to the clock. |
-| | **Calendar and focus timer.** Click the notch (or scroll on it) to open this month's calendar next to a focus timer: presets of 5, 15, 25 and 50 minutes, Start / Pause / Resume and reset. While it runs, the notch shows the time left, and when it ends you hear a chime and see "Time's up". |
+| | **Calendar and focus timer.** Click the notch (or scroll on it) to open this month's calendar next to a focus timer: presets of 5, 15, 25 and 50 minutes, Start / Pause / Resume and reset. While it runs, the notch shows the time left, and when it ends you hear a chime and see "Time's up". The next countdown sits beside the month, its days get a dot, finished rounds go to your status endpoint's focus log, and the timer shows this week's total. |
+| | **Home.** Scroll on to switch tiles for Home Assistant (through your status endpoint) and the system volume, like Bloom's command center. |
+| | **DJ mode.** While Mixxx runs with the ClaudeDJ controller mapping, the notch shows both decks' BPM around the crossfader; click for the tracks, their positions and the crossfader. |
 | ![Expanded player with cover, title, controls and volume](screenshot-player.png) | **Player.** Click the album cover (or scroll while the calendar is open) for the player: cover, title (it scrolls when it's too long), artist, previous / play-pause / next and the system volume (click the bar to set it). After that, a click on the notch brings back whichever view you used last. Moving the mouse away closes it. |
 | ![Claude bubble beside the notch](screenshot-claude.png) | **Claude Code.** While a session runs, a bubble slides out beside the notch. Its spark twinkles while Claude works, blinks when it needs you and dims when it's done, in the colour of the permission mode. |
 | ![Notch saying needs you](screenshot-claude-needs-you.png) | **Pulses.** For a few seconds the notch widens and says what happened: "needs you", "done", a mode switch, a battery change, or a server that went down ("nextcloud down" in red, "nextcloud is back" in green). |
-| | **Status bubble.** On the right, a bubble counts what waits for you on a status endpoint of your own (approvals and questions; a red "!" when a monitor is down). Click it for the details and an "Open" button. |
+| | **Status bubble.** On the right, a bubble counts what waits for you on a status endpoint of your own (approvals and questions; a red "!" when a monitor is down). Click it for the details, answer buttons for the first question, and an "Open" button. Bills due within three days and the next birthday (from 7:00, once a day) arrive as pulses. |
 
 Width, height and the bubble move on springs with Bloom's constants (width 400/31, height 450/29),
 the old content fades out before the new one fades in, and it all runs at 60 frames a second. When
@@ -47,7 +49,14 @@ nothing moves, the skin does almost no work.
 
 `lat`/`lon` turn on the weather (Open-Meteo, no key). `hq_island_url` is any URL that answers with
 `Key=Value` lines (`Approvals`, `Approval`, `Questions`, `Question`, `Incidents`, `Incident`, `Down`,
-`DownNames`, `Todo`, `TodoDue`, `TodoOverdue`); leave it out and the status bubble stays hidden.
+`DownNames`, `Todo`, `TodoDue`, `TodoOverdue`, `Leave`, `LeaveFor`, `LeaveIn`, `NextDep`, `Bill`, `BillIn`,
+`Birthday`, `BirthdayIn`, `Countdowns`, `FocusWeek`, `QuestionId`, `QuestionOptions`, `Home`); leave it out
+and the status bubble stays hidden. Answers, focus rounds and switch toggles are POSTed to the same URL
+with `/act` added to its path (`do=answer|pomo|toggle`).
+
+DJ mode needs `pip install mido python-rtmidi`. `@Resources\djstate.py` asks a Mixxx controller mapping on
+the `ClaudeDJ` MIDI port for `STATUS` every 2 seconds while Mixxx runs. It opens and closes the port each
+time and sends nothing else.
 
 ## Installation
 

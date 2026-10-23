@@ -1,4 +1,8 @@
 """Slow feeds for the Dynamic Island, run by the skin once a minute: python feeds.py
+Actions from the island (then the feed is refreshed at once):
+    python feeds.py act answer <question id> <option index>
+    python feeds.py act pomo <minutes>
+    python feeds.py act toggle <entity id>
 
 Reads Feeds.local.json next to this file (not in git, every key optional):
     hq_island_url   a Key=Value status endpoint (the author's agent company "HQ"): approvals and
@@ -10,6 +14,8 @@ Writes Feeds.inc, one Key=Value per line in a fixed order for the skin's WebPars
 import json
 import os
 import time
+import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -17,12 +23,38 @@ HERE = Path(__file__).parent
 OUT = HERE / 'Feeds.inc'
 WEATHER = HERE / 'Weather.json'
 KEYS = ['HqOk', 'Approvals', 'Approval', 'Questions', 'Question', 'Incidents', 'Incident', 'Down',
-        'DownNames', 'Todo', 'TodoDue', 'TodoOverdue', 'Temp', 'WxIcon', 'HqUrl']
+        'DownNames', 'Todo', 'TodoDue', 'TodoOverdue', 'Temp', 'WxIcon', 'HqUrl', 'Leave', 'LeaveFor',
+        'LeaveIn', 'NextDep', 'Bill', 'BillIn', 'Birthday', 'BirthdayIn', 'Countdowns', 'FocusWeek',
+        'QuestionId', 'QuestionOptions', 'Home']
 
 
-def get(url, timeout=6):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+def get(url, timeout=6, method='GET'):
+    req = urllib.request.Request(url, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode('utf-8', 'replace')
+
+
+def act(cfg, what, args):
+    """POST an island action to the status endpoint's /act sibling (same token)."""
+    url = cfg.get('hq_island_url')
+    if not url:
+        return
+    u = urllib.parse.urlsplit(url)
+    q = {k: v for k, v in urllib.parse.parse_qsl(u.query) if k != 'fmt'}
+    if what == 'answer':          # the option's full text comes from the JSON view, not the clipped feed line
+        info = json.loads(get(urllib.parse.urlunsplit(u._replace(query=urllib.parse.urlencode(q)))))
+        qq, opts = info.get('question') or {}, info.get('question_options') or []
+        if str(qq.get('id')) != args[0] or not 0 <= int(args[1]) < len(opts):
+            return                    # the question changed meanwhile: do nothing
+        q.update(do='answer', id=args[0], answer=opts[int(args[1])])
+    elif what == 'pomo':
+        q.update(do='pomo', minutes=args[0])
+    elif what == 'toggle':
+        q.update(do='toggle', entity=args[0])
+    else:
+        return
+    get(urllib.parse.urlunsplit(u._replace(path=u.path.rstrip('/') + '/act', query=urllib.parse.urlencode(q))),
+        method='POST')
 
 
 def hq(cfg, out):
@@ -81,6 +113,11 @@ def main():
         cfg = json.loads((HERE / 'Feeds.local.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         cfg = {}
+    if sys.argv[1:2] == ['act'] and len(sys.argv) > 3:
+        try:
+            act(cfg, sys.argv[2], sys.argv[3:])
+        except Exception:
+            pass                       # the refreshed feed shows whether it worked
     out = dict.fromkeys(KEYS, '')
     hq(cfg, out)
     weather(cfg, out)

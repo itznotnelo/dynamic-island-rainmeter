@@ -16,7 +16,7 @@ local MODE_RGB = {
   Default = '215,119,87', Plan = '72,150,140', Edits = '175,135,255',
   Auto = '255,193,7', Bypass = '255,107,128',
 }
-local GREEN, RED, ORANGE = '50,215,75', '255,69,58', '255,159,10'
+local GREEN, RED, ORANGE, YELLOW = '50,215,75', '255,69,58', '255,159,10', '255,214,10'
 local MONTHS = { 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
   'September', 'October', 'November', 'December' }
 local CHIME = [[C:\Windows\Media\Alarm01.wav]]
@@ -84,7 +84,8 @@ function Initialize()
   S.hover, S.open = false, false
   S.panel, S.lastPanel, S.scrollAt = 'calendar', 'calendar', -1
   S.timer = { dur = 25 * 60, left = 0, running = false, endAt = 0, finished = false }
-  S.calKey = ''
+  S.calKey, S.calStart = '', 0
+  S.pulsed, S.homeOverride, S.homeList = {}, {}, {}
 end
 
 -- Mouse, called from the skin with !CommandMeasure (Bloom's triggers)
@@ -95,8 +96,21 @@ end
 local function openPanel(panel)
   S.open, S.panel, S.lastPanel = true, panel, panel
 end
-function Click()                                -- the notch: the last panel, else the calendar
-  if not S.open then openPanel(S.lastPanel == 'music' and S.hasMusic and 'music' or 'calendar') end
+local function panels()                         -- what the wheel cycles through
+  local list = { 'calendar' }
+  if #S.homeList > 0 then list[#list + 1] = 'home' end
+  if S.djOn then list[#list + 1] = 'dj' end
+  if S.hasMusic then list[#list + 1] = 'music' end
+  return list
+end
+local function available(panel)
+  for _, p in ipairs(panels()) do if p == panel then return true end end
+  return false
+end
+function Click()                                -- the notch: the decks while DJing, else the last panel
+  if not S.open then
+    openPanel(S.djLive and 'dj' or available(S.lastPanel) and S.lastPanel or 'calendar')
+  end
 end
 function HqClick()                              -- the HQ bubble: what waits for you
   openPanel('hq')
@@ -107,8 +121,11 @@ end
 function Scroll()                               -- wheel: opens the calendar, then calendar <-> player
   if t - S.scrollAt < 0.25 then return end
   S.scrollAt = t
-  if not S.open then openPanel('calendar')
-  elseif S.hasMusic and S.panel ~= 'hq' then openPanel(S.panel == 'music' and 'calendar' or 'music') end
+  if not S.open then openPanel('calendar') return end
+  if S.panel == 'hq' then return end
+  local list, nxt = panels(), 1
+  for i, p in ipairs(list) do if p == S.panel then nxt = i % #list + 1 end end
+  openPanel(list[nxt])
 end
 
 -- Focus timer in the calendar panel: presets 5/15/25/50 min, Start/Pause/Resume/Restart, reset
@@ -156,6 +173,28 @@ local function showGroup(name, on)
   end
 end
 local function str(m) return SKIN:GetMeasure(m):GetStringValue() end
+local function runAct(args)
+  SKIN:Bang('!SetVariable', 'ActArgs', args)
+  SKIN:Bang('!UpdateMeasure', 'MeasureAct')
+  SKIN:Bang('!CommandMeasure', 'MeasureAct', 'Run')
+end
+function HomeToggle(i)                          -- a Home Assistant switch; shown flipped until the feed agrees
+  local h = S.homeList[i]
+  if not h then return end
+  S.homeOverride[h.entity] = { state = h.state == 'on' and 'off' or 'on', was = h.state }
+  S.rest = false
+  runAct('toggle ' .. h.entity)
+end
+function Answer(k)                              -- one of the shown question's options
+  local qid = str('MeasureFQuestionId')
+  if qid == '' or S.answering == qid then return end
+  S.answering = qid
+  S.rest = false
+  runAct('answer ' .. qid .. ' ' .. (k - 1))
+end
+function FeedTick()                             -- a feed file was re-read: look at it this frame
+  S.feedTick = (S.feedTick or 0) + 1
+end
 local function num(m) return SKIN:GetMeasure(m):GetValue() end
 local function alpha(a) return string.format('%d', math.floor(math.max(0, math.min(1, a)) * 255 + 0.5)) end
 
@@ -205,6 +244,7 @@ local function tickTimer()
     T.running, T.left, T.finished = false, 0, true
     pushPulse("Time's up", RED, 6)
     SKIN:Bang('[Play "' .. CHIME .. '"]')
+    runAct('pomo ' .. math.floor(T.dur / 60))
   end
 end
 
@@ -222,6 +262,7 @@ local function calendar()
       local d = i - start
       set('D' .. i, (d >= 1 and d <= days and d ~= now.day) and tostring(d) or '')
     end
+    S.calStart = start
     local ti = start + now.day - 1
     set('TodayCol', ti % 7)
     set('TodayRow', math.floor(ti / 7))
@@ -253,6 +294,25 @@ local function readEvents()
     end
   end
   S.lastBattery = be
+  -- the bus to catch, bills due soon, the next birthday (from 7:00): each one once
+  local function once(key, text, rgb, secs)
+    if not S.pulsed[key] then S.pulsed[key] = true pushPulse(text, rgb, secs) end
+  end
+  local leaveIn = tonumber(str('MeasureFLeaveIn'))
+  if leaveIn and leaveIn <= 10 then
+    local line = str('MeasureFLeave'):match('^(%S+)') or ''
+    once('leave ' .. str('MeasureFLeave'), 'Bus ' .. line .. ' in ' .. leaveIn .. ' min, ' .. str('MeasureFLeaveFor'), ORANGE, 8)
+  end
+  if str('MeasureFBill') ~= '' then
+    local d = tonumber(str('MeasureFBillIn')) or 0
+    once('bill ' .. os.date('%Y-%m-%d') .. str('MeasureFBill'),
+      (d == 0 and 'Due today: ' or d == 1 and 'Due tomorrow: ' or 'Due in ' .. d .. ' days: ') .. str('MeasureFBill'), ORANGE, 6)
+  end
+  local bdIn = tonumber(str('MeasureFBirthdayIn'))
+  if bdIn and bdIn <= 14 and tonumber(os.date('%H')) >= 7 then
+    once('bd ' .. os.date('%Y-%m-%d'), str('MeasureFBirthday') ..
+      (bdIn == 0 and ' today!' or bdIn == 1 and ' tomorrow' or ' in ' .. bdIn .. ' days'), YELLOW, 5)
+  end
   -- homelab (Uptime Kuma via HQ): red when a monitor goes down, green when it's back
   if str('MeasureFHqOk') == '1' then
     local now = {}
@@ -321,7 +381,7 @@ function Update()
   local sig = table.concat({ track, str('MeasureArtist'), tostring(playing), tostring(compact),
     str('MeasureCover'), str('MeasureClock'), cs, str('MeasureClaudeMode'), str('MeasureClaudeEventAt'),
     num('MeasureEvent'), num('MeasureMicActive'), num('MeasureCamActive'), num('MeasureVolume'),
-    str('MeasureFHqOk'), num('MeasureFApprovals'), num('MeasureFQuestions'), str('MeasureFDownNames'),
+    S.feedTick or 0, str('MeasureFHqOk'), num('MeasureFApprovals'), num('MeasureFQuestions'), str('MeasureFDownNames'),
     num('MeasureFIncidents'), str('MeasureFTodo'), str('MeasureFTemp'), str('MeasureFWxIcon'),
     tostring(S.hover), tostring(S.open), S.panel, T.left, tostring(T.running), tostring(T.finished),
     cs == 1 and math.floor(t / 0.25) or cs == 2 and math.floor(t / 0.5) or 0 }, '|')
@@ -338,16 +398,42 @@ function Update()
   if hqOk then
     if downN > 0 then table.insert(S.hqRows, { plural(downN, 'monitor down', 'monitors down'), str('MeasureFDownNames'), RED }) end
     if incN > 0 then table.insert(S.hqRows, { plural(incN, 'incident', 'incidents'), str('MeasureFIncident'), RED }) end
+    if str('MeasureFBill') ~= '' then table.insert(S.hqRows, { 'Bill due soon', str('MeasureFBill'), ORANGE }) end
     if approvals > 0 then table.insert(S.hqRows, { plural(approvals, 'approval waiting', 'approvals waiting'), str('MeasureFApproval'), '255,255,255' }) end
-    if questions > 0 then table.insert(S.hqRows, { plural(questions, 'question', 'questions'), str('MeasureFQuestion'), '255,255,255' }) end
   end
-  while #S.hqRows > 3 do table.remove(S.hqRows) end
+  if str('MeasureFQuestionId') ~= S.answering then S.answering = nil end
+  S.qopts = {}
+  for o in (str('MeasureFQuestionOptions') .. ' || '):gmatch('(.-) || ') do
+    if o ~= '' and #S.qopts < 3 then S.qopts[#S.qopts + 1] = o end
+  end
+  S.qblock = hqOk and questions > 0 and #S.qopts > 0 and not S.answering
+  if hqOk and questions > 0 and not S.qblock then
+    table.insert(S.hqRows, { plural(questions, 'question', 'questions'), str('MeasureFQuestion'), '255,255,255' })
+  end
+  while #S.hqRows > (S.qblock and 2 or 3) do table.remove(S.hqRows) end
+  S.hqH = 36 + 12 + #S.hqRows * 38 + (S.qblock and (49 + #S.qopts * 28) or 0) + 48
+
+  -- Home Assistant switches (a toggle shows at once, the feed confirms it a moment later)
+  S.homeList = {}
+  for ent, name, state in str('MeasureFHome'):gmatch('([^;|]+)|([^;|]+)|([^;|]+)') do
+    local o = S.homeOverride[ent]
+    if o and o.was ~= state then S.homeOverride[ent], o = nil, nil end
+    S.homeList[#S.homeList + 1] = { entity = ent, name = name, state = o and o.state or state }
+  end
+  while #S.homeList > 4 do table.remove(S.homeList) end
+
+  -- DJ mode (djstate.py: Mixxx through its ClaudeDJ mapping)
+  S.djOn = num('MeasureDjOn') == 1
+  S.djLive = S.djOn and (num('MeasureDjAPlay') == 1 or num('MeasureDjBPlay') == 1)
+  if not S.djOn and S.panel == 'dj' then S.open = false end
   if S.open and S.panel == 'hq' and #S.hqRows == 0 then S.open = false end
 
   -- hover (nothing open, no music in the notch): weather left, next to-do right, like Bloom's status view
   local statusOn = S.hover and not S.open and not compact and (str('MeasureFTemp') ~= '' or str('MeasureFTodo') ~= '')
-  local tm, dm = SKIN:GetMeter('MeterWxTemp'), SKIN:GetMeter('MeterTodoProbe')
-  local lw = str('MeasureFTemp') ~= '' and (17 + (tm and tm:GetW() or 20)) or 0
+  local busOn = str('MeasureFLeave') ~= ''
+  local tm = SKIN:GetMeter(busOn and 'MeterBusText' or 'MeterWxTemp')
+  local dm = SKIN:GetMeter('MeterTodoProbe')
+  local lw = (busOn or str('MeasureFTemp') ~= '') and (17 + (tm and tm:GetW() or 20)) or 0
   local rw = str('MeasureFTodo') ~= '' and (17 + math.min(160, dm and dm:GetW() or 100)) or 0
   S.sideW = math.max(lw, rw)
 
@@ -358,7 +444,11 @@ function Update()
   if S.open and S.panel == 'music' and S.hasMusic then
     want, w, h = 'expanded', 340, 120
   elseif S.open and S.panel == 'hq' then
-    want, w, h = 'hq', 380, 36 + 12 + #S.hqRows * 38 + 48
+    want, w, h = 'hq', 380, S.hqH
+  elseif S.open and S.panel == 'home' and #S.homeList > 0 then
+    want, w, h = 'home', 350, 52 + math.ceil(#S.homeList / 2) * 64 + 8 + 12 + 16
+  elseif S.open and S.panel == 'dj' and S.djOn then
+    want, w, h = 'dj', 380, 124
   elseif S.open then
     want, w, h, r = 'calendar', 480, calendar() == 6 and 305 or 273, 28
   elseif pulse and not S.hover then
@@ -368,8 +458,9 @@ function Update()
     if pulse.t <= 0 then table.remove(S.pulses, 1) end
   else
     want, h = 'row', 36
-    w = CLOCK_W + (compact and SLOT or 0) + (compact and playing and SLOT or 0)
-    if statusOn then w = math.max(300, 2 * (41 + S.sideW + 14)) end
+    if S.djLive then want = 'djrow' end
+    w = S.djLive and 300 or CLOCK_W + (compact and SLOT or 0) + (compact and playing and SLOT or 0)
+    if statusOn and not S.djLive then w = math.max(300, 2 * (41 + S.sideW + 14)) end
   end
   S.layer.want = want
   S.w.to, S.h.to, S.r.to = w, h, r
@@ -390,8 +481,11 @@ function Update()
   local pulseA = L.cur == 'pulse' and L.a or 0
   local calA = L.cur == 'calendar' and L.a or 0
   local hqA = L.cur == 'hq' and L.a or 0
+  local homeA = L.cur == 'home' and L.a or 0
+  local djA = L.cur == 'dj' and L.a or 0
+  local djrowA = L.cur == 'djrow' and L.a or 0
   -- the clock row stays while the calendar opens or closes below it
-  local function withClock(x) return x == 'row' or x == 'calendar' or x == 'hq' end
+  local function withClock(x) return x == 'row' or x == 'calendar' or x == 'hq' or x == 'home' end
   local clockA = withClock(L.cur) and (withClock(L.want) and 1 or L.a) or 0
 
   S.bg.to = (S.hover or S.open) and 1 or 0
@@ -506,14 +600,40 @@ function Update()
     set('Pre' .. k .. 'Bg', alpha(calA * (on and 0.12 or 0)))
   end
   set('TimTop', 52 + ((H - 68) - 180) / 2)
+  local today = os.time({ year = tonumber(os.date('%Y')), month = tonumber(os.date('%m')), day = tonumber(os.date('%d')), hour = 12 })
+  local cdText, k = '', 0
+  for title, y, m, d in str('MeasureFCountdowns'):gmatch('([^;|]+)|(%d+)%-(%d+)%-(%d+)') do
+    local n = math.floor((os.time({ year = tonumber(y), month = tonumber(m), day = tonumber(d), hour = 12 }) - today) / 86400 + 0.5)
+    if cdText == '' then
+      cdText = title .. (n == 0 and ' today' or n == 1 and ' tomorrow' or ' in ' .. n .. ' days')
+    end
+    if tonumber(y) == tonumber(os.date('%Y')) and tonumber(m) == tonumber(os.date('%m')) and k < 4 then
+      k = k + 1
+      local idx = S.calStart + tonumber(d) - 1
+      set('Dot' .. k .. 'Col', idx % 7)
+      set('Dot' .. k .. 'Row', math.floor(idx / 7))
+      set('Dot' .. k .. 'RGB', tonumber(d) == tonumber(os.date('%d')) and '0,0,0' or '255,255,255')
+    end
+  end
+  for j = 1, 4 do set('Dot' .. j .. 'A', alpha(calA * (j <= k and 0.7 or 0))) end
+  set('CdText', cdText)
+  set('CdA', alpha(calA * 0.5))
+  local fw = num('MeasureFFocusWeek')
+  if not T.running and not paused and not T.finished and fw > 0 then
+    set('TimStatus', fw >= 60 and string.format('%d h %02d focused this week', math.floor(fw / 60), fw % 60)
+      or (fw .. ' min focused this week'))
+  end
 
   -- status widgets on hover
   local stA = rowA * ease(S.status.x)
   set('WxTemp', str('MeasureFTemp'))           -- the skin adds the degree sign (keeps this file ASCII)
   local wx = str('MeasureFWxIcon')
   for _, k in ipairs({ 'sun', 'moon', 'cloud', 'rain', 'snow', 'bolt', 'fog' }) do
-    set('Wx_' .. k, alpha(stA * 0.85 * (wx == k and 1 or 0)))
+    set('Wx_' .. k, alpha(stA * 0.85 * (wx == k and not busOn and 1 or 0)))
   end
+  set('WxA', alpha(stA * 0.85 * (busOn and 0 or 1)))
+  set('BusA', alpha(stA * 0.85 * (busOn and 1 or 0)))
+  set('BusText', str('MeasureFLeave'))
   set('StatusA', alpha(stA * 0.85))
   showGroup('Status', stA > 0)
   set('TodoText', str('MeasureFTodo'))
@@ -525,6 +645,17 @@ function Update()
   set('HqA', alpha(hqA))
   set('HqMutedA', alpha(hqA * 0.6))
   showGroup('HqPanel', hqA > 0)
+  local qy = 48 + #S.hqRows * 38
+  set('QY', qy)
+  set('QHead', S.qblock and plural(questions, 'question', 'questions') or '')
+  set('QText', S.qblock and str('MeasureFQuestion') or '')
+  showGroup('QOpts', hqA > 0 and S.qblock)
+  for j = 1, 3 do
+    set('QOpt' .. j, S.qopts[j] or '')
+    set('QOpt' .. j .. 'Y', qy + 49 + (j - 1) * 28)
+    set('QOpt' .. j .. 'A', alpha(hqA * ((S.qblock and S.qopts[j]) and 1 or 0)))
+    set('QOpt' .. j .. 'Bg', alpha(hqA * ((S.qblock and S.qopts[j]) and 0.1 or 0)))
+  end
   for i = 1, 3 do
     local row = S.hqRows[i]
     set('HqHead' .. i, row and row[1] or '')
@@ -532,9 +663,48 @@ function Update()
     set('HqRGB' .. i, row and row[3] or '255,255,255')
   end
 
+  -- Home panel (350 wide, Bloom's command center): switch tiles, then the volume
+  set('HomeA', alpha(homeA))
+  set('HomeMutedA', alpha(homeA * 0.6))
+  set('HomeTrackA', alpha(homeA * 0.15))
+  showGroup('HomePanel', homeA > 0)
+  for i = 1, 4 do
+    local hh = S.homeList[i]
+    local on = hh and hh.state == 'on'
+    set('Tile' .. i .. 'Name', hh and hh.name or '')
+    set('Tile' .. i .. 'State', hh and (on and 'On' or hh.state == 'off' and 'Off' or 'Unavailable') or '')
+    set('Tile' .. i .. 'Bg', alpha(homeA * (hh and (on and 1 or 0.1) or 0)))
+    set('Tile' .. i .. 'RGB', on and '0,0,0' or '255,255,255')
+    set('Tile' .. i .. 'A', alpha(homeA * (hh and 1 or 0)))
+    set('Tile' .. i .. 'MutedA', alpha(homeA * (hh and 0.6 or 0)))
+  end
+  set('HomeVolY', 52 + math.ceil(#S.homeList / 2) * 64 + 8)
+  set('HomeVolW', 278 * math.max(0, math.min(100, num('MeasureVolume'))) / 100)
+
+  -- DJ: compact (decks' BPM around a crossfader) and the panel (tracks, positions, crossfader)
+  local xf = tonumber(str('MeasureDjXf')) or 0
+  set('DjRowA', alpha(djrowA))
+  set('DjRowMutedA', alpha(djrowA * 0.6))
+  set('DjA', alpha(djA))
+  set('DjMutedA', alpha(djA * 0.6))
+  set('DjTrackA', alpha(math.max(djA, djrowA) * 0.2))
+  set('DjXf', (xf + 1) / 2)
+  showGroup('DjRow', djrowA > 0)
+  showGroup('DjPanel', djA > 0)
+  for _, d in ipairs({ 'A', 'B' }) do
+    local play = num('MeasureDj' .. d .. 'Play') == 1
+    local loaded = num('MeasureDj' .. d .. 'Loaded') == 1
+    set('Dj' .. d .. 'Bpm', loaded and str('MeasureDj' .. d .. 'Bpm') or '--')
+    set('Dj' .. d .. 'Dot', play and GREEN or '255,255,255')
+    set('Dj' .. d .. 'DotA', alpha(math.max(djA, djrowA) * (play and 1 or 0.3)))
+    set('Dj' .. d .. 'Title', loaded and (str('MeasureDj' .. d .. 'Title') ~= '' and str('MeasureDj' .. d .. 'Title') or 'Unknown track') or 'Empty')
+    set('Dj' .. d .. 'Artist', str('MeasureDj' .. d .. 'Artist'))
+    set('Dj' .. d .. 'PosW', 166 * math.max(0, math.min(1, tonumber(str('MeasureDj' .. d .. 'Pos')) or 0)))
+  end
+
   -- HQ bubble on the right: what waits for you (approvals + questions), red when something's down
   local waiting = approvals + questions
-  local hqOn = hqOk and (waiting > 0 or downN > 0 or incN > 0) and not S.open
+  local hqOn = hqOk and (waiting > 0 or downN > 0 or incN > 0) and not S.open and not S.djLive
   S.hqb.to = hqOn and 1 or 0
   S.hqbA.to = hqOn and 1 or 0
   S.hqb:step(dt)

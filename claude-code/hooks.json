@@ -1,0 +1,78 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/hooks/claude-modes.py",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/hooks/claude-modes.py",
+            "timeout": 10,
+            "async": true
+          }
+        ],
+        "matcher": "AskUserQuestion|ExitPlanMode"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/hooks/claude-modes.py",
+            "timeout": 10,
+            "async": true
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/hooks/claude-modes.py",
+            "timeout": 10,
+            "async": true
+          }
+        ],
+        "matcher": "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/hooks/claude-modes.py",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/hooks/claude-modes.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

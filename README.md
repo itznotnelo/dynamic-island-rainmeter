@@ -36,8 +36,35 @@ Windows machine actually running Rainmeter. `screenshot.png` is the one real cap
   or camera is actively in use
 - **App icon** - shows the source app's icon (Spotify, browser, etc.) next to the now-playing info
 
+- **Claude Code spark** - optional, see [Claude Code](#claude-code) below
+
 No credentials, API keys, or browser extensions required anywhere - everything is read from native
 Windows APIs (SMTC, WMI, and the registry).
+
+## Claude Code
+
+If you use [Claude Code](https://claude.com/claude-code), a small spark on the left of the pill shows
+what it's doing:
+
+| Spark | Meaning |
+|---|---|
+| turning | Claude is working |
+| blinking | Claude needs you (a permission prompt or a question) |
+| still and dimmed | Claude is done and it's your turn (disappears after 10 minutes) |
+
+Its colour is the permission mode, as in the Claude Code footer: orange for manual, teal for plan,
+purple for accept edits, yellow for auto, pink for bypass. When Claude starts needing you, finishes,
+or switches mode, the clock is replaced for 3 seconds by "needs you", "done" or the new mode. With
+several sessions open, the island follows the most urgent one.
+
+Setup:
+
+1. Copy `claude-code/claude-modes.py` to `~/.claude/hooks/` (Python 3 on your PATH).
+2. Merge the `hooks` block from `claude-code/hooks.json` into `~/.claude/settings.json`, then open
+   `/hooks` once in Claude Code (or restart it) so it picks them up.
+
+The hook writes `~/.claude/claude-modes/status.json` and `NowPlaying.ps1` reads it every second. The
+hooks run in the background, so Claude never waits for them. Without the hook the spark stays hidden.
 
 ## Requirements
 

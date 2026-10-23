@@ -1,7 +1,8 @@
 # Dynamic Island - Windows system poller
 # Run periodically by Rainmeter (Plugin=RunCommand). Reports now-playing
-# media (via SMTC), battery status, and mic/camera privacy indicators - no
-# API keys, no browser extension, no extra installs.
+# media (via SMTC), battery status, mic/camera privacy indicators and the
+# Claude Code state (from the claude-modes hook) - no API keys, no browser
+# extension, no extra installs.
 # Writes NowPlaying.inc for the skin to read via a WebParser file:// measure.
 #
 # Note: live per-track cover-art was attempted via the SMTC Thumbnail
@@ -94,6 +95,38 @@ function Test-CapabilityActive {
     return $false
 }
 
+# === Claude Code (status file written by the claude-modes hook) ===
+# State 0 idle, 1 working, 2 needs you, 3 done. Mode picks the colour of the
+# spark (same colours as the Claude Code footer). Event 1/2/3 = needs you /
+# done / mode changed, inside the same 8 s window as the battery events.
+
+$claudePath = Join-Path $env:USERPROFILE '.claude/claude-modes/status.json'
+$claudeModes = @{ plan = 'Plan'; acceptEdits = 'Edits'; auto = 'Auto'; bypassPermissions = 'Bypass' }
+$claudeLabels = @{ Default = 'manual'; Plan = 'plan mode'; Edits = 'edit mode'; Auto = 'auto mode'; Bypass = 'bypass' }  # max 9 characters: wider runs into the spark
+
+function Get-ClaudeInfo {
+    $idle = @{ ClaudeState = 0; ClaudeMode = 'Default'; ClaudeEvent = 0; ClaudeLabel = '' }
+    if (-not (Test-Path $claudePath)) { return $idle }
+    try {
+        $s = Get-Content $claudePath -Raw | ConvertFrom-Json
+        $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        # A session that crashed never says goodbye: its status runs out instead.
+        if ($nowMs -gt $s.until_ms) { return $idle }
+
+        $info = $idle.Clone()
+        $info.ClaudeState = [int](@{ working = 1; needs_you = 2; done = 3 }[[string]$s.state])
+        if ($claudeModes.ContainsKey([string]$s.mode)) { $info.ClaudeMode = $claudeModes[[string]$s.mode] }
+        if (($nowMs - $s.changed_ms) -lt 8000) {
+            switch ($s.change) {
+                'needs_you' { $info.ClaudeEvent = 1; $info.ClaudeLabel = 'needs you' }
+                'done'      { $info.ClaudeEvent = 2; $info.ClaudeLabel = 'done' }
+                'mode'      { $info.ClaudeEvent = 3; $info.ClaudeLabel = $claudeLabels[$info.ClaudeMode] }
+            }
+        }
+        return $info
+    } catch { return $idle }
+}
+
 # === Event decay: "recently changed" window for the battery HUD ===
 # Event 2 = AC plug/unplug (any BatteryStatus change). Event 3 = battery
 # dropped below the low-battery threshold while unplugged. Event 4 = battery
@@ -180,7 +213,11 @@ function Write-NowPlaying {
         [int]$BatteryCharging = 0,
         [int]$MicActive = 0,
         [int]$CamActive = 0,
-        [int]$EventCode = 0
+        [int]$EventCode = 0,
+        [int]$ClaudeState = 0,
+        [string]$ClaudeMode = 'Default',
+        [int]$ClaudeEvent = 0,
+        [string]$ClaudeLabel = ''
     )
     @(
         "Track=$Track"
@@ -194,6 +231,10 @@ function Write-NowPlaying {
         "MicActive=$MicActive"
         "CamActive=$CamActive"
         "Event=$EventCode"
+        "ClaudeState=$ClaudeState"
+        "ClaudeMode=$ClaudeMode"
+        "ClaudeEvent=$ClaudeEvent"
+        "ClaudeLabel=$ClaudeLabel"
     ) | Set-Content -Path $outInc -Encoding utf8
 }
 
@@ -203,6 +244,7 @@ $batteryInfo = Get-BatteryInfo
 $micActive = [int](Test-CapabilityActive -Capability 'microphone')
 $camActive = [int](Test-CapabilityActive -Capability 'webcam')
 $eventCode = Get-EventCode -CurrentStatus $batteryInfo.Status -CurrentPercent $batteryInfo.Percent -CurrentCharging $batteryInfo.Charging
+$claudeInfo = Get-ClaudeInfo
 
 # === SMTC now-playing (independent of the above) ===
 
@@ -223,7 +265,7 @@ function Wait-WinRT($WinRtOperation, [type]$ResultType) {
 $commonArgs = @{
     BatteryPercent = $batteryInfo.Percent; BatteryCharging = $batteryInfo.Charging
     MicActive = $micActive; CamActive = $camActive; EventCode = $eventCode
-}
+} + $claudeInfo
 
 try {
     $sessionManager = Wait-WinRT ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) `

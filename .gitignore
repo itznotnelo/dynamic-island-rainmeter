@@ -3,3 +3,10 @@
 @Resources/NowPlaying.inc
 @Resources/EventState.json
 @Resources/SourceIcon.png
+@Resources/CoverState.json
+@Resources/Art0*.png
+@Resources/Art1*.png
+@Resources/Glow0.png
+@Resources/Glow1.png
+@Resources/*.tmp.png
+@Resources/__pycache__/

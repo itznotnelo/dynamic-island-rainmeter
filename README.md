@@ -1,61 +1,55 @@
 # Dynamic Island for Rainmeter
 
-A macOS-style Dynamic Island for Windows, built with [Rainmeter](https://www.rainmeter.net/). Sits
-collapsed at the top-center of your screen showing a small clock, and expands smoothly on hover into
-now-playing, battery, and privacy status - all read straight from Windows' own APIs, no cloud service
-or API key involved.
+A notch-style Dynamic Island for Windows, built with [Rainmeter](https://www.rainmeter.net/). It hangs
+from the top edge of the screen, shows the time, and comes alive when music plays or Claude Code is
+working. The look and the motion follow [Bloom](https://github.com/SehajveerSingh2005/bloom) by
+Sehajveer Singh: the same sizes, colours, font and spring physics, rebuilt from scratch for Rainmeter.
 
-![Dynamic Island collapsed, showing the clock](screenshot.png)
+![The island showing the time](screenshot.png)
 
-## What it looks like
+## What it does
 
-| Idle | Hover → now playing |
+| | |
 |---|---|
-| ![Collapsed pill showing the time](screenshot.png) | ![Expanded pill showing track, artist, progress bar and playback controls](screenshot-now-playing.png) |
+| ![Black notch with the time](screenshot.png) | **Idle.** A 124x36 black notch with the clock, curving into the screen edge. Hovering darkens it a little. |
+| ![Notch with visualizer, time and album cover](screenshot-now-playing.png) | **Music.** A 5-bar visualizer that reacts to what you hear, and the album cover with a soft glow. Five seconds after you pause, it goes back to the clock. |
+| ![Expanded player with cover, title, controls and volume](screenshot-player.png) | **Player.** Click the notch to open it: cover, title (it scrolls when it's too long), artist, previous / play-pause / next and the system volume (click the bar to set it). Moving the mouse away closes it. |
+| ![Claude bubble beside the notch](screenshot-claude.png) | **Claude Code.** While a session runs, a bubble slides out beside the notch. Its spark twinkles while Claude works, blinks when it needs you and dims when it's done, in the colour of the permission mode. |
+| ![Notch saying needs you](screenshot-claude-needs-you.png) | **Pulses.** For a few seconds the notch widens and says what happened: "needs you", "done", a mode switch, or a battery change. |
 
-| Battery swap-in | Low battery warning | Mic / camera privacy dot |
-|---|---|---|
-| ![Collapsed pill showing battery percentage](screenshot-battery.png) | ![Collapsed pill showing battery percentage in red below 20%](screenshot-battery-low.png) | ![Collapsed pill with a green mic dot and orange camera dot](screenshot-privacy.png) |
+Width, height and the bubble move on springs with Bloom's constants (width 400/31, height 450/29),
+the old content fades out before the new one fades in, and it all runs at 60 frames a second. When
+nothing moves, the skin does almost no work.
 
-*(The now-playing/battery/privacy renders above are rebuilt pixel-for-pixel from the skin's own
-`DynamicIsland.ini` spec - same sizes, radii, colors and fonts - since capturing them live needs a
-Windows machine actually running Rainmeter. `screenshot.png` is the one real capture.)*
+## Requirements
 
-## Features
+- Windows 10/11 and [Rainmeter](https://www.rainmeter.net/) 4.5 or newer. It uses the Lua, AudioLevel
+  and Win7Audio plugins that come with Rainmeter.
+- The Inter font is included in `@Resources\Fonts` (SIL Open Font License), so there's nothing to install.
+- Album covers need Python 3 with
+  `pip install winrt-runtime winrt-Windows.Media.Control winrt-Windows.Storage.Streams winrt-Windows.Foundation pillow`.
+  Without it the island shows an empty tile where the cover would be.
 
-- **Idle clock** - a small pill docked top-center showing the time
-- **Hover to expand** - smoothly grows to show the current media session (title, artist, progress bar,
-  playback controls) via Windows' native System Media Transport Controls - no Spotify/media-player API
-  keys, no browser extension
-- **Playback controls** - previous / play-pause / next, right from the pill
-- **Battery swap-in** - on plug/unplug, the clock briefly swaps for the battery percentage in the same
-  small pill, no resizing
-- **Low battery warnings** - the percentage swaps in again automatically (in red) if you drop below
-  20%, and again at a more urgent 10% critical tier
-- **Mic / camera privacy dot** - a small colored dot appears on the collapsed pill while the microphone
-  or camera is actively in use
-- **App icon** - shows the source app's icon (Spotify, browser, etc.) next to the now-playing info
+## Installation
 
-- **Claude Code spark** - optional, see [Claude Code](#claude-code) below
-
-No credentials, API keys, or browser extensions required anywhere - everything is read from native
-Windows APIs (SMTC, WMI, and the registry).
+1. Download or clone this repository.
+2. Copy the folder into your Rainmeter skins folder, typically `Documents\Rainmeter\Skins\DynamicIsland`.
+3. In Rainmeter, refresh the skin list and load `DynamicIsland.ini`. It centres itself at the top of
+   the screen and stays on top.
 
 ## Claude Code
 
-If you use [Claude Code](https://claude.com/claude-code), a small spark on the left of the pill shows
-what it's doing:
+If you use [Claude Code](https://claude.com/claude-code), the island shows what it's doing:
 
-| Spark | Meaning |
+| Spark in the bubble | Meaning |
 |---|---|
-| turning | Claude is working |
+| twinkling | Claude is working |
 | blinking | Claude needs you (a permission prompt or a question) |
-| still and dimmed | Claude is done and it's your turn (disappears after 10 minutes) |
+| still and dimmed | Claude is done and it's your turn (the bubble leaves after 10 minutes) |
 
-Its colour is the permission mode, as in the Claude Code footer: orange for manual, teal for plan,
-purple for accept edits, yellow for auto, pink for bypass. When Claude starts needing you, finishes,
-or switches mode, the clock is replaced for 3 seconds by "needs you", "done" or the new mode. With
-several sessions open, the island follows the most urgent one.
+The spark's colour is the permission mode, as in the Claude Code footer: orange for manual, teal for
+plan, purple for accept edits, yellow for auto, pink for bypass. With several sessions open, the
+island follows the most urgent one and doesn't jump between sessions that are equally busy.
 
 Setup:
 
@@ -63,45 +57,26 @@ Setup:
 2. Merge the `hooks` block from `claude-code/hooks.json` into `~/.claude/settings.json`, then open
    `/hooks` once in Claude Code (or restart it) so it picks them up.
 
-The hook writes `~/.claude/claude-modes/status.json` and `NowPlaying.ps1` reads it every second. The
-hooks run in the background, so Claude never waits for them. Without the hook the spark stays hidden.
-
-## Requirements
-
-- Windows 10/11
-- [Rainmeter](https://www.rainmeter.net/) (4.x or newer)
-- The **JetBrainsMono Nerd Font** installed - it's what renders the playback/battery icons. Get it
-  from [Nerd Fonts](https://www.nerdfonts.com/font-downloads). Without it, the icons will show as blank
-  boxes (the text will still work fine).
-
-## Installation
-
-1. Download or clone this repository.
-2. Copy the `DynamicIsland` folder into your Rainmeter skins folder - typically:
-   ```
-   Documents\Rainmeter\Skins\DynamicIsland
-   ```
-3. In Rainmeter, refresh the skin list (right-click the tray icon → Refresh all, or `Manage` →
-   refresh) and load `DynamicIsland.ini`.
-4. Make sure JetBrainsMono Nerd Font is installed, then refresh the skin once more if the icons don't
-   show up right away.
-
-The skin polls system state (media session, battery, mic/camera) via a PowerShell script every second
-- all state files it generates (`NowPlaying.inc`, `EventState.json`, `SourceIcon.png`) are created
-automatically on first run in `@Resources\`.
+The hook writes `~/.claude/claude-modes/status.json`, which `NowPlaying.ps1` reads every second. The
+hooks run in the background, so Claude never waits for them. Without the hook the bubble stays hidden.
 
 ## How it works
 
-- `DynamicIsland.ini` is the Rainmeter skin itself - meters, layout, and the hover/event animation
-  logic.
-- `@Resources\NowPlaying.ps1` is a small poller script (run periodically via Rainmeter's `RunCommand`
-  plugin) that reads:
-  - the current media session via the `Windows.Media.Control` WinRT API
-  - battery status via WMI (`Win32_Battery`)
-  - microphone/camera activity via the `CapabilityAccessManager` registry keys
+- `DynamicIsland.ini`: the measures and meters. Everything inside the notch is clipped to its shape.
+- `@Resources\Island.lua`: the springs, fades, title marquee and visualizer smoothing. It hands its
+  results to the meters as variables and redraws only when something changed.
+- `@Resources\NowPlaying.ps1`: once a second reads the media session (SMTC), battery (WMI), microphone
+  and camera use (registry) and the Claude Code status, and writes `NowPlaying.inc` for the skin.
+- `@Resources\cover.py`: on each new track reads the cover from the media session (WinRT) and renders
+  the rounded tiles and the blurred glow behind the player (Pillow).
 
-  ...and writes it all to a plain-text `.inc` file that the skin reads via a `WebParser` measure.
+## Credits
+
+Design and motion after [Bloom](https://github.com/SehajveerSingh2005/bloom) by Sehajveer Singh
+(GPL-3.0). No Bloom code or images are used here: the sizes, colours and spring values were taken
+from it and implemented again for Rainmeter. Font: [Inter](https://rsms.me/inter/) by Rasmus
+Andersson (SIL Open Font License, see `@Resources\Fonts\OFL.txt`).
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

@@ -1,0 +1,182 @@
+"""Album art for the Dynamic Island.
+
+PowerShell 5.1 can read the track title from Windows' media session but not its
+thumbnail stream, so NowPlaying.ps1 calls this on every track change:
+
+    python cover.py <@Resources folder> <slot>
+
+For slot 0 or 1 (two slots, so Rainmeter loads the new image instead of its cached one):
+    Art<slot>S.png   compact art, 24 px with radius 6 and a soft glow behind it (56x56)
+    Art<slot>L.png   expanded art, 96 px with radius 12, drop shadow and hairline ring (144x144)
+    Glow<slot>.png   background glow of the expanded view (340x120): the art blown up,
+                     blurred and saturated, fading into the notch colour at the edges
+Exit code 0: art written. 1: no art (yet), placeholder tiles written instead.
+Sizes and filters follow Bloom's island (github.com/SehajveerSingh2005/bloom).
+"""
+import asyncio
+import io
+import math
+import os
+import sys
+from pathlib import Path
+
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter
+
+SS = 4                      # supersampling for smooth corners
+GLOW_W, GLOW_H = 340, 120   # expanded island
+NOTCH_A = 0.92              # notch background opacity while expanded
+
+
+async def thumbnail():
+    from winrt.windows.media.control import \
+        GlobalSystemMediaTransportControlsSessionManager as Manager
+    from winrt.windows.storage.streams import Buffer, DataReader, InputStreamOptions
+
+    session = (await Manager.request_async()).get_current_session()
+    if session is None:
+        return None
+    ref = (await session.try_get_media_properties_async()).thumbnail
+    if ref is None:
+        return None
+    stream = await ref.open_read_async()
+    if not stream.size:
+        return None
+    buf = Buffer(stream.size)
+    await stream.read_async(buf, stream.size, InputStreamOptions.READ_AHEAD)
+    data = bytearray(buf.length)
+    DataReader.from_buffer(buf).read_bytes(data)
+    return Image.open(io.BytesIO(bytes(data))).convert('RGB')
+
+
+def cover_crop(img, w, h):
+    """object-fit: cover"""
+    s = max(w / img.width, h / img.height)
+    img = img.resize((max(w, round(img.width * s)), max(h, round(img.height * s))), Image.LANCZOS)
+    x, y = (img.width - w) // 2, (img.height - h) // 2
+    return img.crop((x, y, x + w, y + h))
+
+
+def rounded_mask(w, h, r):
+    m = Image.new('L', (w * SS, h * SS), 0)
+    ImageDraw.Draw(m).rounded_rectangle((0, 0, w * SS - 1, h * SS - 1), r * SS, fill=255)
+    return m.resize((w, h), Image.LANCZOS)
+
+
+def tile(art, size, r):
+    """Rounded art, or Bloom's empty tile (white at 15 %) when there is none."""
+    if art is None:
+        img = Image.new('RGBA', (size, size), (255, 255, 255, 38))
+    else:
+        img = cover_crop(art, size, size).convert('RGBA')
+    img.putalpha(ImageChops.multiply(img.getchannel('A'), rounded_mask(size, size, r)))
+    return img
+
+
+def blur(img, radius):
+    """Gaussian blur that lets transparent edges bleed in, like CSS blur()."""
+    return img.convert('RGBa').filter(ImageFilter.GaussianBlur(radius)).convert('RGBA')
+
+
+def filters(img, saturate=1.0, contrast=1.0, brightness=1.0):
+    a = img.getchannel('A')
+    rgb = img.convert('RGB')
+    rgb = ImageEnhance.Color(rgb).enhance(saturate)
+    rgb = ImageEnhance.Contrast(rgb).enhance(contrast)
+    rgb = ImageEnhance.Brightness(rgb).enhance(brightness)
+    out = rgb.convert('RGBA')
+    out.putalpha(a)
+    return out
+
+
+def opacity(img, a):
+    img = img.copy()
+    img.putalpha(img.getchannel('A').point(lambda v: round(v * a)))
+    return img
+
+
+def compact(art):
+    """24 px art r6 at (16,16); behind it the art inset -4 (32 px r10), blur 6, saturate 2.5,
+    brightness .8, opacity .6"""
+    canvas = Image.new('RGBA', (56, 56), (0, 0, 0, 0))
+    if art is not None:
+        glow = filters(blur_pad(tile(art, 32, 10), 12, 6), saturate=2.5, brightness=0.8)
+        canvas.alpha_composite(opacity(glow, 0.6), (0, 0))
+    canvas.alpha_composite(tile(art, 24, 6), (16, 16))
+    return canvas
+
+
+def blur_pad(img, pad, radius):
+    big = Image.new('RGBA', (img.width + 2 * pad, img.height + 2 * pad), (0, 0, 0, 0))
+    big.alpha_composite(img, (pad, pad))
+    return blur(big, radius)
+
+
+def expanded(art):
+    """96 px art r12 at (24,24), shadow 0 4px 16px rgba(0,0,0,.4), 0.5 px ring rgba(255,255,255,.1)"""
+    canvas = Image.new('RGBA', (144, 144), (0, 0, 0, 0))
+    shadow = Image.new('RGBA', (144, 144), (0, 0, 0, 0))
+    shadow.paste((0, 0, 0, 102), (24, 28, 120, 124), rounded_mask(96, 96, 12))
+    canvas.alpha_composite(blur(shadow, 8))
+    canvas.alpha_composite(tile(art, 96, 12), (24, 24))
+    ring = Image.new('RGBA', (144 * SS, 144 * SS), (0, 0, 0, 0))
+    ImageDraw.Draw(ring).rounded_rectangle((24 * SS - 2, 24 * SS - 2, 120 * SS + 1, 120 * SS + 1),
+                                           12 * SS + 2, outline=(255, 255, 255, 26), width=2)
+    canvas.alpha_composite(ring.resize((144, 144), Image.LANCZOS))
+    return canvas
+
+
+def ambient(art):
+    """Bloom's .notch-ambient-glow: the art as object-fit cover, blur 52, saturate 3.5,
+    contrast 1.1, brightness 1.4, then scaled 1.8 from the centre (CSS applies the filter
+    before the transform), opacity .85, under a radial gradient that fades to the notch
+    colour: transparent 20 %, black 25 % at 50 %, notch background at 85 %."""
+    if art is None:
+        return Image.new('RGBA', (GLOW_W, GLOW_H), (0, 0, 0, 0))
+    el = cover_crop(art, GLOW_W, GLOW_H).convert('RGBA')
+    el = filters(blur_pad(el, 120, 52), saturate=3.5, contrast=1.1, brightness=1.4)
+    k = 1.8
+    big = el.resize((round(el.width * k), round(el.height * k)), Image.LANCZOS)
+    x, y = (big.width - GLOW_W) // 2, (big.height - GLOW_H) // 2
+    glow = opacity(big.crop((x, y, x + GLOW_W, y + GLOW_H)), 0.85)
+
+    over = Image.new('L', (GLOW_W, GLOW_H), 0)
+    rx, ry = GLOW_W / 2 * math.sqrt(2), GLOW_H / 2 * math.sqrt(2)   # farthest-corner ellipse
+    px = over.load()
+    for j in range(GLOW_H):
+        for i in range(GLOW_W):
+            s = math.hypot((i + 0.5 - GLOW_W / 2) / rx, (j + 0.5 - GLOW_H / 2) / ry)
+            if s <= 0.20:
+                a = 0.0
+            elif s <= 0.50:
+                a = 0.25 * (s - 0.20) / 0.30
+            elif s <= 0.85:
+                a = 0.25 + (NOTCH_A - 0.25) * (s - 0.50) / 0.35
+            else:
+                a = NOTCH_A
+            px[i, j] = round(a * 255)
+    shade = Image.new('RGBA', (GLOW_W, GLOW_H), (0, 0, 0, 0))
+    shade.putalpha(over)
+    glow.alpha_composite(shade)
+    return glow
+
+
+def save(img, path):
+    tmp = path.with_suffix('.tmp.png')
+    img.save(tmp)
+    os.replace(tmp, path)
+
+
+def main():
+    out, slot = Path(sys.argv[1]), sys.argv[2]
+    try:
+        art = asyncio.run(thumbnail())
+    except Exception:
+        art = None
+    save(compact(art), out / f'Art{slot}S.png')
+    save(expanded(art), out / f'Art{slot}L.png')
+    save(ambient(art), out / f'Glow{slot}.png')
+    return 0 if art is not None else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

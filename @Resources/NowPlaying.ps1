@@ -5,15 +5,10 @@
 # extension, no extra installs.
 # Writes NowPlaying.inc for the skin to read via a WebParser file:// measure.
 #
-# Note: live per-track cover-art was attempted via the SMTC Thumbnail
-# stream but hits a confirmed Windows PowerShell 5.1 WinRT interop
-# limitation (the IRandomAccessStream COM object isn't properly projected
-# for property/method access in this environment, and a compiled C# helper
-# hit missing Windows SDK metadata dependencies - Title/Artist/timeline all
-# read fine, only the stream interfaces fail). Instead, this shows the
-# SOURCE APP's icon (e.g. Spotify, or the browser playing a video) via
-# ordinary System.Drawing icon extraction - not the exact track art, but a
-# real image, no extra installs needed.
+# Album art: PowerShell 5.1 can't read the SMTC thumbnail stream (its WinRT
+# interop doesn't project IRandomAccessStream), so on each track change this
+# calls @Resources\cover.py (Python + winrt), which writes the rounded art
+# tiles and the blurred glow for the expanded view into slot 0 or 1.
 #
 # Battery/privacy both use classic WMI/registry (not WinRT) and are
 # reliable in this environment, unlike the thumbnail stream above.
@@ -28,35 +23,34 @@ param(
 $ErrorActionPreference = 'Stop'
 $here       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outInc     = Join-Path $here 'NowPlaying.inc'
-$iconPath   = Join-Path $here 'SourceIcon.png'
 $statePath  = Join-Path $here 'EventState.json'
 
-# === Now-playing icon (unchanged from before) ===
+# === Album art (cover.py, once per track) ===
+# Two slots so Rainmeter loads the new file instead of its cached image. A
+# track's thumbnail can show up a moment after its title, so a miss is
+# retried on the next few polls.
 
-function Save-SourceIcon {
-    param([string]$AppUserModelId)
+$coverState = Join-Path $here 'CoverState.json'
+$coverPy    = Join-Path $here 'cover.py'
 
-    $exePath = $null
-    if ($AppUserModelId -and $AppUserModelId -like '*.exe' -and (Test-Path $AppUserModelId -ErrorAction SilentlyContinue)) {
-        $exePath = $AppUserModelId
-    } else {
-        foreach ($name in @('Spotify', 'vlc', 'msedge', 'chrome', 'firefox')) {
-            $p = Get-Process -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($p -and $p.Path) { $exePath = $p.Path; break }
-        }
+function Update-Cover {
+    param([string]$Key)
+    $st = $null
+    if (Test-Path $coverState) { try { $st = Get-Content $coverState -Raw | ConvertFrom-Json } catch { } }
+    if (-not $st) { $st = [pscustomobject]@{ Key = ''; Slot = 1; Tries = 0 } }
+    if ($st.Key -ne $Key) {
+        $st.Key = $Key; $st.Slot = 1 - $st.Slot; $st.Tries = 0
+    } elseif ($st.Tries -ge 5) {
+        return [string]$st.Slot
     }
-    if (-not $exePath) { return }
-
     try {
-        Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
-        $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exePath)
-        if ($icon) {
-            $bmp = $icon.ToBitmap()
-            $bmp.Save($iconPath, [System.Drawing.Imaging.ImageFormat]::Png)
-            $bmp.Dispose()
-            $icon.Dispose()
-        }
-    } catch { }
+        & python $coverPy $here $st.Slot 2>$null | Out-Null
+        $st.Tries = if ($LASTEXITCODE -eq 0) { 99 } else { $st.Tries + 1 }
+    } catch {
+        $st.Tries = 99   # no Python: keep the placeholder tiles
+    }
+    ($st | ConvertTo-Json) | Set-Content -Path $coverState -Encoding utf8
+    return [string]$st.Slot
 }
 
 # === Battery (WMI, confirmed reliable) ===
@@ -105,7 +99,7 @@ $claudeModes = @{ plan = 'Plan'; acceptEdits = 'Edits'; auto = 'Auto'; bypassPer
 $claudeLabels = @{ Default = 'manual'; Plan = 'plan mode'; Edits = 'edit mode'; Auto = 'auto mode'; Bypass = 'bypass' }  # max 9 characters: wider runs into the spark
 
 function Get-ClaudeInfo {
-    $idle = @{ ClaudeState = 0; ClaudeMode = 'Default'; ClaudeEvent = 0; ClaudeLabel = '' }
+    $idle = @{ ClaudeState = 0; ClaudeMode = 'Default'; ClaudeEvent = 0; ClaudeLabel = ''; ClaudeEventAt = '' }
     if (-not (Test-Path $claudePath)) { return $idle }
     try {
         $s = Get-Content $claudePath -Raw | ConvertFrom-Json
@@ -117,6 +111,7 @@ function Get-ClaudeInfo {
         $info.ClaudeState = [int](@{ working = 1; needs_you = 2; done = 3 }[[string]$s.state])
         if ($claudeModes.ContainsKey([string]$s.mode)) { $info.ClaudeMode = $claudeModes[[string]$s.mode] }
         if (($nowMs - $s.changed_ms) -lt 8000) {
+            $info.ClaudeEventAt = [string]$s.changed_ms
             switch ($s.change) {
                 'needs_you' { $info.ClaudeEvent = 1; $info.ClaudeLabel = 'needs you' }
                 'done'      { $info.ClaudeEvent = 2; $info.ClaudeLabel = 'done' }
@@ -217,7 +212,9 @@ function Write-NowPlaying {
         [int]$ClaudeState = 0,
         [string]$ClaudeMode = 'Default',
         [int]$ClaudeEvent = 0,
-        [string]$ClaudeLabel = ''
+        [string]$ClaudeLabel = '',
+        [string]$ClaudeEventAt = '',
+        [string]$Cover = ''
     )
     @(
         "Track=$Track"
@@ -235,6 +232,8 @@ function Write-NowPlaying {
         "ClaudeMode=$ClaudeMode"
         "ClaudeEvent=$ClaudeEvent"
         "ClaudeLabel=$ClaudeLabel"
+        "ClaudeEventAt=$ClaudeEventAt"
+        "Cover=$Cover"
     ) | Set-Content -Path $outInc -Encoding utf8
 }
 
@@ -302,10 +301,10 @@ try {
     $positionMs = [long]$timeline.Position.TotalMilliseconds
     $durationMs = [long]($timeline.EndTime - $timeline.StartTime).TotalMilliseconds
 
-    Save-SourceIcon -AppUserModelId $session.SourceAppUserModelId
+    $cover = if ($props.Title) { Update-Cover -Key "$($props.Title)|$($props.Artist)" } else { '' }
 
     Write-NowPlaying @commonArgs -Track $props.Title -Artist $props.Artist -IsPlaying $isPlaying `
-        -ProgressMs $positionMs -DurationMs $durationMs
+        -ProgressMs $positionMs -DurationMs $durationMs -Cover $cover
 } catch {
     Write-NowPlaying @commonArgs
 }

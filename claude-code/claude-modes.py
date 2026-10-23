@@ -70,16 +70,20 @@ def write(path, obj):
     tmp.replace(path)
 
 
-def combined(now):
-    """Most urgent live session (newest wins a tie); stale session files are removed."""
-    top = None
+def combined(now, keep):
+    """Most urgent live session; a tie keeps the session shown so far (`keep`), so two
+    sessions working side by side don't make the island flip between them. Stale
+    session files are removed."""
+    top, best = None, None
     for f in SESSIONS.glob('*.json'):
         s = read(f, None)
         if not s or now - s.get('ts', 0) > STALE.get(s.get('state'), 0):
             f.unlink(missing_ok=True)
             continue
-        if top is None or (RANK[s['state']], s['ts']) > (RANK[top['state']], top['ts']):
-            top = s
+        s['sid'] = f.stem
+        key = (RANK[s['state']], f.stem == keep, s['ts'])
+        if best is None or key > best:
+            top, best = s, key
     return top
 
 
@@ -111,10 +115,11 @@ def main():
         write(f, {'state': state, 'mode': mode, 'ts': now})
 
     prev = read(STATUS, {})
-    top = combined(now) or {'state': 'idle', 'mode': 'default', 'ts': now}
+    top = combined(now, prev.get('session')) or {'state': 'idle', 'mode': 'default', 'ts': now, 'sid': ''}
     cur = {
         'state': top['state'],
         'mode': top['mode'],
+        'session': top['sid'],
         'change': prev.get('change', ''),
         'changed_ms': prev.get('changed_ms', 0),
         'until_ms': int((top['ts'] + STALE[top['state']]) * 1000),
@@ -123,7 +128,8 @@ def main():
     change = ''
     if cur['state'] != was and cur['state'] in ('needs_you', 'done'):
         change = cur['state']
-    elif cur['mode'] != prev.get('mode', cur['mode']) and cur['state'] != 'idle':
+    elif (cur['mode'] != prev.get('mode', cur['mode']) and cur['state'] != 'idle'
+          and cur['session'] == prev.get('session')):  # a real switch, not another session
         change = 'mode'
     if change:
         cur['change'], cur['changed_ms'] = change, int(now * 1000)

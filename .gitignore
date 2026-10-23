@@ -14,3 +14,9 @@
 @Resources/Feeds.inc
 @Resources/Weather.json
 @Resources/DjState.inc
+@Resources/FeedsState.json
+@Resources/PcState.inc
+@Resources/ScreenTime.json
+@Resources/Color*.txt
+@Resources/Lyrics*.txt
+@Resources/Vocab.local.txt

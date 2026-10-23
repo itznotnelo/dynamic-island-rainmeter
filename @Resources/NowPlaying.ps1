@@ -34,7 +34,7 @@ $coverState = Join-Path $here 'CoverState.json'
 $coverPy    = Join-Path $here 'cover.py'
 
 function Update-Cover {
-    param([string]$Key)
+    param([string]$Key, [string]$Title = '', [string]$Artist = '', [long]$DurationMs = 0)
     $st = $null
     if (Test-Path $coverState) { try { $st = Get-Content $coverState -Raw | ConvertFrom-Json } catch { } }
     if (-not $st) { $st = [pscustomobject]@{ Key = ''; Slot = 1; Tries = 0 } }
@@ -44,7 +44,7 @@ function Update-Cover {
         return [string]$st.Slot
     }
     try {
-        & python $coverPy $here $st.Slot 2>$null | Out-Null
+        & python $coverPy $here $st.Slot --title $Title --artist $Artist --duration $DurationMs 2>$null | Out-Null
         $st.Tries = if ($LASTEXITCODE -eq 0) { 99 } else { $st.Tries + 1 }
     } catch {
         $st.Tries = 99   # no Python: keep the placeholder tiles
@@ -299,9 +299,15 @@ try {
 
     $isPlaying = [int]($playbackInfo.PlaybackStatus.ToString() -eq 'Playing')
     $positionMs = [long]$timeline.Position.TotalMilliseconds
+    # SMTC only refreshes the position on play/pause/seek: carry it forward from when it was taken
+    if ($isPlaying -eq 1 -and $timeline.LastUpdatedTime.Year -gt 2000) {
+        $positionMs += [long]([DateTimeOffset]::Now - $timeline.LastUpdatedTime).TotalMilliseconds
+    }
     $durationMs = [long]($timeline.EndTime - $timeline.StartTime).TotalMilliseconds
 
-    $cover = if ($props.Title) { Update-Cover -Key "$($props.Title)|$($props.Artist)" } else { '' }
+    $cover = if ($props.Title) {
+        Update-Cover -Key "$($props.Title)|$($props.Artist)" -Title $props.Title -Artist $props.Artist -DurationMs $durationMs
+    } else { '' }
 
     Write-NowPlaying @commonArgs -Track $props.Title -Artist $props.Artist -IsPlaying $isPlaying `
         -ProgressMs $positionMs -DurationMs $durationMs -Cover $cover

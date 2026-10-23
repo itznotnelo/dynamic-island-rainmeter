@@ -3,6 +3,9 @@ Actions from the island (then the feed is refreshed at once):
     python feeds.py act answer <question id> <option index>
     python feeds.py act pomo <minutes>
     python feeds.py act toggle <entity id>
+    python feeds.py act media <play_pause|next|previous>     music playing on the phone
+    python feeds.py act chore <id>                            today's chore done
+    python feeds.py act push                                  the clipboard's text to the phone
 
 Reads Feeds.local.json next to this file (not in git, every key optional):
     hq_island_url   a Key=Value status endpoint (the author's agent company "HQ"): approvals and
@@ -22,16 +25,43 @@ from pathlib import Path
 HERE = Path(__file__).parent
 OUT = HERE / 'Feeds.inc'
 WEATHER = HERE / 'Weather.json'
+STATE = HERE / 'FeedsState.json'     # what was already handled: phone-music cover, shop alarm flash
 KEYS = ['HqOk', 'Approvals', 'Approval', 'Questions', 'Question', 'Incidents', 'Incident', 'Down',
         'DownNames', 'Todo', 'TodoDue', 'TodoOverdue', 'Temp', 'WxIcon', 'HqUrl', 'Leave', 'LeaveFor',
         'LeaveIn', 'NextDep', 'Bill', 'BillIn', 'Birthday', 'BirthdayIn', 'Countdowns', 'FocusWeek',
-        'QuestionId', 'QuestionOptions', 'Home']
+        'QuestionId', 'QuestionOptions', 'Home', 'Shift', 'ShiftIn', 'Wear', 'Tomorrow', 'SpotifyTitle',
+        'SpotifyArtist', 'SpotifyState', 'SpotifyArt', 'SpotifyPos', 'SpotifyDur', 'SpotifyDevice', 'Money',
+        'ShopAlarm', 'ShopAlarmAt', 'Upload', 'UploadAt', 'Word', 'WordMeaning', 'PRs', 'PR', 'Followers',
+        'FollowersDelta', 'Chore', 'ChoreId', 'Briefing', 'BriefingDate', 'Events', 'PiholeBlocked', 'RainIn',
+        'SpotifySlot']
 
 
 def get(url, timeout=6, method='GET'):
     req = urllib.request.Request(url, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode('utf-8', 'replace')
+
+
+def clipboard_text():
+    """The clipboard's text (Windows, no extra packages)."""
+    import ctypes
+    from ctypes import wintypes
+    u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+    u32.GetClipboardData.restype = k32.GlobalLock.restype = ctypes.c_void_p
+    k32.GlobalLock.argtypes = k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    if not u32.OpenClipboard(None):
+        return ''
+    try:
+        h = u32.GetClipboardData(13)                     # CF_UNICODETEXT
+        if not h:
+            return ''
+        p = k32.GlobalLock(h)
+        try:
+            return ctypes.wstring_at(p) if p else ''
+        finally:
+            k32.GlobalUnlock(h)
+    finally:
+        u32.CloseClipboard()
 
 
 def act(cfg, what, args):
@@ -51,6 +81,15 @@ def act(cfg, what, args):
         q.update(do='pomo', minutes=args[0])
     elif what == 'toggle':
         q.update(do='toggle', entity=args[0])
+    elif what == 'media' and args[0] in ('play_pause', 'next', 'previous'):
+        q.update(do='media', cmd=args[0])
+    elif what == 'chore':
+        q.update(do='chore', id=args[0])
+    elif what == 'push':
+        text = clipboard_text().strip()[:1000]
+        if not text:
+            return
+        q.update(do='push', text=text)
     else:
         return
     get(urllib.parse.urlunsplit(u._replace(path=u.path.rstrip('/') + '/act', query=urllib.parse.urlencode(q))),
@@ -87,6 +126,58 @@ def icon(code, day):
     return 'cloud'
 
 
+def rain(cfg, out):
+    """Minutes until rain starts, when it's dry now and rain comes within 45 minutes (15-min steps)."""
+    try:
+        cached = json.loads(WEATHER.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        cached = {}
+    if time.time() - cached.get('rain_at', 0) > 5 * 60:
+        try:
+            url = (f"https://api.open-meteo.com/v1/forecast?latitude={cfg['lat']}&longitude={cfg['lon']}"
+                   "&minutely_15=precipitation&forecast_minutely_15=4&current=precipitation&timezone=auto")
+            d = json.loads(get(url))
+            now_wet = (d.get('current') or {}).get('precipitation', 0) >= 0.1
+            slots = (d.get('minutely_15') or {}).get('precipitation') or []
+            first = next((i for i, v in enumerate(slots) if v and v >= 0.1), None)
+            cached.update(rain_at=time.time(), rain_in='' if now_wet or first is None else str(first * 15))
+            WEATHER.write_text(json.dumps(cached), encoding='utf-8')
+        except Exception:
+            pass
+    out['RainIn'] = cached.get('rain_in', '')
+
+
+def phone_music(out, state):
+    """Cover, tint and lyrics for music playing on the phone (Spotify through HQ), once per track."""
+    if out.get('SpotifyState') != 'playing' or not out.get('SpotifyTitle'):
+        out['SpotifySlot'] = state.get('phone_slot', '')
+        return
+    key = out['SpotifyTitle'] + '|' + out['SpotifyArtist']
+    if state.get('phone_key') != key:
+        slot = 'P1' if state.get('phone_slot') == 'P0' else 'P0'
+        import subprocess
+        subprocess.run([sys.executable, str(HERE / 'cover.py'), str(HERE), slot, '--url', out.get('SpotifyArt', ''),
+                        '--title', out['SpotifyTitle'], '--artist', out['SpotifyArtist'],
+                        '--duration', out.get('SpotifyDur', '')], timeout=40, creationflags=0x08000000)
+        state.update(phone_key=key, phone_slot=slot)
+    out['SpotifySlot'] = state['phone_slot']
+
+
+def shop_flash(out, state):
+    """A new shop alarm also flashes the keyboard red (the GAM-075 app on this PC)."""
+    at = out.get('ShopAlarmAt', '')
+    if at and at != state.get('shop_at'):
+        if state.get('shop_at') is not None:     # not on the very first run
+            try:
+                req = urllib.request.Request('http://127.0.0.1:7075/api/test-notify', b'{"color": "#ff0000"}',
+                                             {'Content-Type': 'application/json'})
+                urllib.request.urlopen(req, timeout=2).close()
+            except Exception:
+                pass
+        state['shop_at'] = at
+    state.setdefault('shop_at', at)
+
+
 def weather(cfg, out):
     if 'lat' not in cfg or 'lon' not in cfg:
         return
@@ -113,7 +204,7 @@ def main():
         cfg = json.loads((HERE / 'Feeds.local.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         cfg = {}
-    if sys.argv[1:2] == ['act'] and len(sys.argv) > 3:
+    if sys.argv[1:2] == ['act'] and len(sys.argv) > 2:
         try:
             act(cfg, sys.argv[2], sys.argv[3:])
         except Exception:
@@ -121,6 +212,18 @@ def main():
     out = dict.fromkeys(KEYS, '')
     hq(cfg, out)
     weather(cfg, out)
+    if 'lat' in cfg and 'lon' in cfg:
+        rain(cfg, out)
+    try:
+        state = json.loads(STATE.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        state = {}
+    try:
+        phone_music(out, state)
+    except Exception:
+        pass
+    shop_flash(out, state)
+    STATE.write_text(json.dumps(state), encoding='utf-8')
     text = ''.join(f"{k}={' '.join(out[k].split())}\n" for k in KEYS)
     tmp = OUT.with_suffix('.tmp')
     tmp.write_text(text, encoding='utf-8-sig')

@@ -3,21 +3,30 @@
 PowerShell 5.1 can read the track title from Windows' media session but not its
 thumbnail stream, so NowPlaying.ps1 calls this on every track change:
 
-    python cover.py <@Resources folder> <slot>
+    python cover.py <@Resources folder> <slot> [--title T --artist A --duration MS] [--url IMAGE_URL]
 
 For slot 0 or 1 (two slots, so Rainmeter loads the new image instead of its cached one):
     Art<slot>S.png   compact art, 24 px with radius 6 and a soft glow behind it (56x56)
     Art<slot>L.png   expanded art, 96 px with radius 12, drop shadow and hairline ring (144x144)
     Glow<slot>.png   background glow of the expanded view (340x120): the art blown up,
                      blurred and saturated, fading into the notch colour at the edges
+    Color<slot>.txt  the notch's adaptive tint, Bloom-style: the art's hue at 50 % saturation, 15 % light
+    Lyrics<slot>.txt synced lyrics from LRCLIB (free, no key) as "ms<TAB>line", empty when there are none
+--url reads the art from an image URL (music playing on the phone) instead of Windows' media session.
 Exit code 0: art written. 1: no art (yet), placeholder tiles written instead.
 Sizes and filters follow Bloom's island (github.com/SehajveerSingh2005/bloom).
 """
+import argparse
 import asyncio
+import colorsys
 import io
+import json
 import math
 import os
+import re
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter
@@ -160,6 +169,50 @@ def ambient(art):
     return glow
 
 
+def tint(art):
+    """Bloom's adaptive colour: hue of the art's colourful pixels, saturation 50 %, lightness 15 %."""
+    if art is None:
+        return ''
+    x = y = n = 0.0
+    for r, g, b in art.resize((24, 24)).convert('RGB').getdata():
+        h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        if s > 0.25 and v > 0.2:
+            x, y, n = x + s * math.cos(h * 2 * math.pi), y + s * math.sin(h * 2 * math.pi), n + s
+    if n < 3:
+        return ''                                    # black and white art: no tint
+    r, g, b = colorsys.hls_to_rgb((math.atan2(y, x) / (2 * math.pi)) % 1, 0.15, 0.5)
+    return f'{round(r * 255)},{round(g * 255)},{round(b * 255)}'
+
+
+def lyrics(title, artist, duration_ms):
+    """[(ms, line)] from LRCLIB's synced lyrics, best match first; [] when it has none."""
+    if not title:
+        return []
+    ua = {'User-Agent': 'DynamicIsland-Rainmeter (github.com/itznotnelo/dynamic-island-rainmeter)'}
+    q = {'track_name': title, 'artist_name': artist}
+    if duration_ms:
+        q['duration'] = round(int(duration_ms) / 1000)
+    found = None
+    for url in ('https://lrclib.net/api/get?' + urllib.parse.urlencode(q),
+                'https://lrclib.net/api/search?' + urllib.parse.urlencode({'track_name': title, 'artist_name': artist})):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=ua), timeout=6) as r:
+                data = json.loads(r.read())
+        except Exception:
+            continue
+        for d in data if isinstance(data, list) else [data]:
+            if isinstance(d, dict) and d.get('syncedLyrics'):
+                found = d['syncedLyrics']
+                break
+        if found:
+            break
+    out = []
+    for line in (found or '').splitlines():
+        for m, sec, text in re.findall(r'\[(\d+):(\d+(?:\.\d+)?)\]([^\[]*)$', line) or []:
+            out.append((round((int(m) * 60 + float(sec)) * 1000), text.strip()))
+    return sorted(out)
+
+
 def save(img, path):
     tmp = path.with_suffix('.tmp.png')
     img.save(tmp)
@@ -167,14 +220,30 @@ def save(img, path):
 
 
 def main():
-    out, slot = Path(sys.argv[1]), sys.argv[2]
+    ap = argparse.ArgumentParser()
+    ap.add_argument('out')
+    ap.add_argument('slot')
+    ap.add_argument('--title', default='')
+    ap.add_argument('--artist', default='')
+    ap.add_argument('--duration', default='')
+    ap.add_argument('--url', default='')
+    a = ap.parse_args()
+    out, slot = Path(a.out), a.slot
     try:
-        art = asyncio.run(thumbnail())
+        if a.url:
+            with urllib.request.urlopen(a.url, timeout=8) as r:
+                art = Image.open(io.BytesIO(r.read())).convert('RGB')
+        else:
+            art = asyncio.run(thumbnail())
     except Exception:
         art = None
     save(compact(art), out / f'Art{slot}S.png')
     save(expanded(art), out / f'Art{slot}L.png')
     save(ambient(art), out / f'Glow{slot}.png')
+    (out / f'Color{slot}.txt').write_text(tint(art), encoding='utf-8')
+    if a.title:
+        lines = lyrics(a.title, a.artist, a.duration)
+        (out / f'Lyrics{slot}.txt').write_text(''.join(f'{ms}\t{t}\n' for ms, t in lines), encoding='utf-8')
     return 0 if art is not None else 1
 
 

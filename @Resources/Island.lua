@@ -68,6 +68,9 @@ function Initialize()
   S.layer = { cur = 'row', want = 'row', a = 1 }
   S.bubble = Spring.new(400, 31, 1, 0)
   S.bubbleA = Fade.new(0.15)
+  S.hqb = Spring.new(400, 31, 1, 0)             -- HQ bubble on the right
+  S.hqbA = Fade.new(0.15)
+  S.status = Fade.new(0.2)                      -- hover: weather and next to-do beside the clock
   S.bars, S.smooth, S.peak = {}, {}, {}
   for i = 1, 5 do
     S.bars[i] = Spring.new(600, 30, 0.5, 0.1)
@@ -95,6 +98,9 @@ end
 function Click()                                -- the notch: the last panel, else the calendar
   if not S.open then openPanel(S.lastPanel == 'music' and S.hasMusic and 'music' or 'calendar') end
 end
+function HqClick()                              -- the HQ bubble: what waits for you
+  openPanel('hq')
+end
 function ClickArt()                             -- the album art: the player
   openPanel('music')
 end
@@ -102,7 +108,7 @@ function Scroll()                               -- wheel: opens the calendar, th
   if t - S.scrollAt < 0.25 then return end
   S.scrollAt = t
   if not S.open then openPanel('calendar')
-  elseif S.hasMusic then openPanel(S.panel == 'music' and 'calendar' or 'music') end
+  elseif S.hasMusic and S.panel ~= 'hq' then openPanel(S.panel == 'music' and 'calendar' or 'music') end
 end
 
 -- Focus timer in the calendar panel: presets 5/15/25/50 min, Start/Pause/Resume/Restart, reset
@@ -126,11 +132,17 @@ function TimerReset()
 end
 
 local dirty = true        -- meters only redraw when something changed (they have UpdateDivider=-1)
+local changed = {}        -- variables changed this frame
+-- variables that only one meter uses: when nothing else changed, only that meter is updated
+local ONLY = { SparkAngle = 'MeterSpark', SparkA = 'MeterSpark', ClockText = 'MeterClock', TitleX = 'MeterTitle',
+  TimM1 = 'MeterTimM1', TimM2 = 'MeterTimM2', TimS1 = 'MeterTimS1', TimS2 = 'MeterTimS2', TimStatus = 'MeterTimStatus' }
+for i = 1, 5 do ONLY['Bar' .. i], ONLY['BarE' .. i] = 'MeterBars', 'MeterVisE' end
 local function set(name, value)
   if type(value) == 'number' then value = string.format('%.2f', value) end
   if cache[name] ~= value then
     cache[name] = value
     dirty = true
+    changed[name] = true
     SKIN:Bang('!SetVariable', name, value)
   end
 end
@@ -241,6 +253,27 @@ local function readEvents()
     end
   end
   S.lastBattery = be
+  -- homelab (Uptime Kuma via HQ): red when a monitor goes down, green when it's back
+  if str('MeasureFHqOk') == '1' then
+    local now = {}
+    for name in str('MeasureFDownNames'):gmatch('[^,]+') do
+      name = name:gsub('%s*%b()', ''):gsub('^%s+', ''):gsub('%s+$', '')
+      now[name] = true
+    end
+    if S.down then
+      for name in pairs(now) do if not S.down[name] then pushPulse(name .. ' down', RED, 6) end end
+      for name in pairs(S.down) do
+        if not now[name] then
+          for i = #S.pulses, 1, -1 do        -- an outdated "down" goes; "is back" takes its place
+            if S.pulses[i].text == name .. ' down' then table.remove(S.pulses, i) end
+          end
+          pushPulse(name .. ' is back', GREEN, 4)
+        end
+      end
+      if num('MeasureFIncidents') > S.incidents then pushPulse('HQ incident', RED, 6) end
+    end
+    S.down, S.incidents = now, num('MeasureFIncidents')
+  end
 end
 
 local function visualizer(playing)
@@ -258,17 +291,20 @@ end
 local function settled()
   if #S.pulses > 0 or S.layer.cur ~= S.layer.want or (S.layer.a ~= 0 and S.layer.a ~= 1) then return false end
   if S.timer.running then return false end
-  for _, s in ipairs({ S.w, S.h, S.r, S.bubble, S.bars[1], S.bars[2], S.bars[3], S.bars[4], S.bars[5] }) do
+  for _, s in ipairs({ S.w, S.h, S.r, S.bubble, S.hqb, S.bars[1], S.bars[2], S.bars[3], S.bars[4], S.bars[5] }) do
     if s.x ~= s.to or s.v ~= 0 then return false end
   end
-  for _, f in ipairs({ S.bg, S.mute, S.vis, S.art, S.small, S.glow, S.bubbleA }) do
+  for _, f in ipairs({ S.bg, S.mute, S.vis, S.art, S.small, S.glow, S.bubbleA, S.hqbA, S.status }) do
     if f.x ~= f.to then return false end
   end
   return true
 end
 
 function Update()
-  local dt = DT
+  -- real elapsed time (clock() is wall time on Windows): Rainmeter doesn't always manage 60 fps
+  local now = os.clock()
+  local dt = math.min(0.05, math.max(0.001, now - (S.last or now - DT)))
+  S.last = now
   t = t + dt
 
   -- inputs
@@ -285,11 +321,35 @@ function Update()
   local sig = table.concat({ track, str('MeasureArtist'), tostring(playing), tostring(compact),
     str('MeasureCover'), str('MeasureClock'), cs, str('MeasureClaudeMode'), str('MeasureClaudeEventAt'),
     num('MeasureEvent'), num('MeasureMicActive'), num('MeasureCamActive'), num('MeasureVolume'),
+    str('MeasureFHqOk'), num('MeasureFApprovals'), num('MeasureFQuestions'), str('MeasureFDownNames'),
+    num('MeasureFIncidents'), str('MeasureFTodo'), str('MeasureFTemp'), str('MeasureFWxIcon'),
     tostring(S.hover), tostring(S.open), S.panel, T.left, tostring(T.running), tostring(T.finished),
     cs == 1 and math.floor(t / 0.25) or cs == 2 and math.floor(t / 0.5) or 0 }, '|')
   if sig == S.sig and S.rest then return 0 end
   S.sig = sig
   readEvents()
+
+  -- HQ: bubble count and the panel's rows (most urgent first, at most 3)
+  local hqOk = str('MeasureFHqOk') == '1'
+  local approvals, questions = num('MeasureFApprovals'), num('MeasureFQuestions')
+  local downN, incN = #str('MeasureFDownNames') > 0 and num('MeasureFDown') or 0, num('MeasureFIncidents')
+  local function plural(n, one, many) return n .. ' ' .. (n == 1 and one or many) end
+  S.hqRows = {}
+  if hqOk then
+    if downN > 0 then table.insert(S.hqRows, { plural(downN, 'monitor down', 'monitors down'), str('MeasureFDownNames'), RED }) end
+    if incN > 0 then table.insert(S.hqRows, { plural(incN, 'incident', 'incidents'), str('MeasureFIncident'), RED }) end
+    if approvals > 0 then table.insert(S.hqRows, { plural(approvals, 'approval waiting', 'approvals waiting'), str('MeasureFApproval'), '255,255,255' }) end
+    if questions > 0 then table.insert(S.hqRows, { plural(questions, 'question', 'questions'), str('MeasureFQuestion'), '255,255,255' }) end
+  end
+  while #S.hqRows > 3 do table.remove(S.hqRows) end
+  if S.open and S.panel == 'hq' and #S.hqRows == 0 then S.open = false end
+
+  -- hover (nothing open, no music in the notch): weather left, next to-do right, like Bloom's status view
+  local statusOn = S.hover and not S.open and not compact and (str('MeasureFTemp') ~= '' or str('MeasureFTodo') ~= '')
+  local tm, dm = SKIN:GetMeter('MeterWxTemp'), SKIN:GetMeter('MeterTodoProbe')
+  local lw = str('MeasureFTemp') ~= '' and (17 + (tm and tm:GetW() or 20)) or 0
+  local rw = str('MeasureFTodo') ~= '' and (17 + math.min(160, dm and dm:GetW() or 100)) or 0
+  S.sideW = math.max(lw, rw)
 
   -- what the island should be
   local pulse = S.pulses[1]
@@ -297,15 +357,19 @@ function Update()
   local r = R
   if S.open and S.panel == 'music' and S.hasMusic then
     want, w, h = 'expanded', 340, 120
+  elseif S.open and S.panel == 'hq' then
+    want, w, h = 'hq', 380, 36 + 12 + #S.hqRows * 38 + 48
   elseif S.open then
     want, w, h, r = 'calendar', 480, calendar() == 6 and 305 or 273, 28
   elseif pulse and not S.hover then
-    want, w, h = 'pulse', 200, 36
+    local m = SKIN:GetMeter('MeterPulse')
+    want, w, h = 'pulse', math.max(200, (m and m:GetW() or 0) + 48), 36
     pulse.t = pulse.t - dt
     if pulse.t <= 0 then table.remove(S.pulses, 1) end
   else
     want, h = 'row', 36
     w = CLOCK_W + (compact and SLOT or 0) + (compact and playing and SLOT or 0)
+    if statusOn then w = math.max(300, 2 * (41 + S.sideW + 14)) end
   end
   S.layer.want = want
   S.w.to, S.h.to, S.r.to = w, h, r
@@ -325,14 +389,17 @@ function Update()
   local expA = L.cur == 'expanded' and L.a or 0
   local pulseA = L.cur == 'pulse' and L.a or 0
   local calA = L.cur == 'calendar' and L.a or 0
+  local hqA = L.cur == 'hq' and L.a or 0
   -- the clock row stays while the calendar opens or closes below it
-  local function withClock(x) return x == 'row' or x == 'calendar' end
+  local function withClock(x) return x == 'row' or x == 'calendar' or x == 'hq' end
   local clockA = withClock(L.cur) and (withClock(L.want) and 1 or L.a) or 0
 
   S.bg.to = (S.hover or S.open) and 1 or 0
   S.mute.to = (S.hover and not S.open) and 1 or 0
   S.vis.to = (compact and playing and not S.open) and 1 or 0
   S.art.to = (compact and not S.open) and 1 or 0
+  S.status.to = statusOn and 1 or 0
+  S.status:step(dt)
   S.small.to = playing and 0 or 1
   S.glow.to = L.cur == 'expanded' and 1 or 0
   for _, f in ipairs({ S.bg, S.mute, S.vis, S.art, S.small, S.glow }) do f:step(dt) end
@@ -376,6 +443,7 @@ function Update()
 
   -- pulse
   set('PulseA', alpha(pulseA))
+  showGroup('Pulse', pulseA > 0)
   if pulse then set('PulseText', pulse.text) set('PulseRGB', pulse.rgb) end
 
   -- expanded music
@@ -387,6 +455,7 @@ function Update()
   set('GlowA', alpha(ease(S.glow.x)))     -- the 0.85 opacity is baked into the glow image
   set('HitA', expA > 0.5 and '1' or '0')
   showGroup('Player', expA > 0)
+  showGroup('Glow', S.glow.x > 0)
   set('PlayA', alpha(expA * (playing and 0 or 1)))
   set('PauseA', alpha(expA * (playing and 1 or 0)))
   local colW = W - 130 - 12
@@ -438,6 +507,50 @@ function Update()
   end
   set('TimTop', 52 + ((H - 68) - 180) / 2)
 
+  -- status widgets on hover
+  local stA = rowA * ease(S.status.x)
+  set('WxTemp', str('MeasureFTemp'))           -- the skin adds the degree sign (keeps this file ASCII)
+  local wx = str('MeasureFWxIcon')
+  for _, k in ipairs({ 'sun', 'moon', 'cloud', 'rain', 'snow', 'bolt', 'fog' }) do
+    set('Wx_' .. k, alpha(stA * 0.85 * (wx == k and 1 or 0)))
+  end
+  set('StatusA', alpha(stA * 0.85))
+  showGroup('Status', stA > 0)
+  set('TodoText', str('MeasureFTodo'))
+  set('TodoRGB', num('MeasureFTodoOverdue') == 1 and RED or '255,255,255')
+  set('TodoX', left + W - 14 - math.min(160, dm and dm:GetW() or 100))
+  set('TodoW', math.min(160, dm and dm:GetW() or 100))
+
+  -- HQ panel (380 wide): up to 3 rows, then "Open HQ"
+  set('HqA', alpha(hqA))
+  set('HqMutedA', alpha(hqA * 0.6))
+  showGroup('HqPanel', hqA > 0)
+  for i = 1, 3 do
+    local row = S.hqRows[i]
+    set('HqHead' .. i, row and row[1] or '')
+    set('HqSub' .. i, row and row[2] or '')
+    set('HqRGB' .. i, row and row[3] or '255,255,255')
+  end
+
+  -- HQ bubble on the right: what waits for you (approvals + questions), red when something's down
+  local waiting = approvals + questions
+  local hqOn = hqOk and (waiting > 0 or downN > 0 or incN > 0) and not S.open
+  S.hqb.to = hqOn and 1 or 0
+  S.hqbA.to = hqOn and 1 or 0
+  S.hqb:step(dt)
+  S.hqbA:step(dt)
+  local cm = SKIN:GetMeter('MeterHqCount')
+  local bw = math.max(30, (cm and cm:GetW() or 12) + 18)
+  local q = S.hqb.x
+  set('HqCount', (downN > 0 or incN > 0) and '!' or tostring(waiting))
+  set('HqCountRGB', (downN > 0 or incN > 0) and RED or '255,255,255')
+  set('HqBubbleW', bw)
+  set('HqBubbleX', left + W + 8 - 28 * (1 - q))
+  set('HqBubbleS', 0.4 + 0.6 * math.max(0, q))
+  set('HqBubbleA', alpha(S.hqbA.x * (0.80 + 0.12 * ease(S.bg.x))))
+  set('HqTextA', alpha(S.hqbA.x))
+  showGroup('HqBtn', S.hqbA.x > 0)
+
   -- Claude bubble beside the pill (Bloom's live-activity bubble: 30x30, r10, 8 px gap)
   local active = cs > 0 and not S.open
   S.bubble.to = active and 1 or 0
@@ -470,9 +583,17 @@ function Update()
 
   S.rest = settled() and not playing and not S.marqueeOn
   if dirty then
-    dirty = false
-    SKIN:Bang('!UpdateMeterGroup', 'Island')
+    local meters, full = {}, false
+    for name in pairs(changed) do
+      if ONLY[name] then meters[ONLY[name]] = true else full = true break end
+    end
+    if full then
+      SKIN:Bang('!UpdateMeterGroup', 'Island')
+    else
+      for m in pairs(meters) do SKIN:Bang('!UpdateMeter', m) end
+    end
     SKIN:Bang('!Redraw')
+    dirty, changed = false, {}
   end
   return 0
 end

@@ -10,3 +10,6 @@
 @Resources/Glow1.png
 @Resources/*.tmp.png
 @Resources/__pycache__/
+@Resources/Feeds.local.json
+@Resources/Feeds.inc
+@Resources/Weather.json

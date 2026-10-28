@@ -20,7 +20,7 @@ Sehajveer Singh: the same sizes, colours, font and spring physics, rebuilt from 
 | | **Calls and recording.** In a Discord or Teams call the notch shows who and how long, with a mic button (the mic dot works as a mute button too). While Mixxx records a set, the right bubble shows a red REC timer. |
 | | **DJ mode.** While Mixxx runs with the ClaudeDJ controller mapping, the notch shows both decks' BPM around the crossfader; click for the tracks, their positions and the crossfader. |
 | ![Expanded player with cover, title, controls and volume](screenshot-player.png) | **Player.** Click the album cover (or scroll while the calendar is open) for the player: cover, title (it scrolls when it's too long), artist, previous / play-pause / next and the system volume (click the bar to set it). After that, a click on the notch brings back whichever view you used last. Moving the mouse away closes it. |
-| ![Claude bubble beside the notch](screenshot-claude.png) | **Claude Code.** While a session runs, a bubble slides out beside the notch. Its spark twinkles while Claude works, blinks when it needs you and dims when it's done, in the colour of the permission mode. |
+| ![Claude bubble beside the notch](screenshot-claude.png) | **Claude Code.** While a session runs, a bubble slides out beside the notch. It glows while Claude works and blinks when it needs you. When it's done it turns blue and stays blue until you look (hover the island), then turns green and fades away. Click it for the Claude panel: project, how long this turn has run, Read / Edit / Test / Done and the file or command it's on. |
 | ![Notch saying needs you](screenshot-claude-needs-you.png) | **Pulses.** For a few seconds the notch widens and says what happened: "needs you", "done", a mode switch, a battery change, a server that went down ("nextcloud down" in red, "nextcloud is back" in green), the internet dropping, a shop alarm, an upload that landed, the next shift with what to wear, the morning briefing (scrolling), and a bedtime nudge at 23:00. Long ones scroll. |
 | | **Status bubble.** On the right, a bubble counts what waits for you on a status endpoint of your own (approvals and questions; a red "!" when a monitor is down). Click it for the details, answer buttons for the first question, and an "Open" button. It also lists the pull requests waiting for your merge. Bills due within three days and the next birthday (from 7:00, once a day) arrive as pulses. |
 
@@ -77,9 +77,14 @@ If you use [Claude Code](https://claude.com/claude-code), the island shows what 
 
 | Spark in the bubble | Meaning |
 |---|---|
-| twinkling | Claude is working |
-| blinking | Claude needs you (a permission prompt or a question) |
-| still and dimmed | Claude is done and it's your turn (the bubble leaves after 10 minutes) |
+| twinkling, soft glow | Claude is working |
+| blinking, orange glow | Claude needs you (a permission prompt or a question) |
+| blue | Claude is done and you haven't looked yet (stays up to 12 hours) |
+| green, fading | you hovered the island, so it knows you've seen it |
+
+Click the bubble (or scroll to it) for the Claude panel: the project folder, a timer for the current
+turn, what it's doing (reading code, making changes, running tests, done, step n of 4) with a bar per
+step, and the last file or command it touched.
 
 The spark's colour is the permission mode, as in the Claude Code footer: orange for manual, teal for
 plan, purple for accept edits, yellow for auto, pink for bypass. With several sessions open, the

@@ -99,7 +99,8 @@ $claudeModes = @{ plan = 'Plan'; acceptEdits = 'Edits'; auto = 'Auto'; bypassPer
 $claudeLabels = @{ Default = 'manual'; Plan = 'plan mode'; Edits = 'edit mode'; Auto = 'auto mode'; Bypass = 'bypass' }  # max 9 characters: wider runs into the spark
 
 function Get-ClaudeInfo {
-    $idle = @{ ClaudeState = 0; ClaudeMode = 'Default'; ClaudeEvent = 0; ClaudeLabel = ''; ClaudeEventAt = '' }
+    $idle = @{ ClaudeState = 0; ClaudeMode = 'Default'; ClaudeEvent = 0; ClaudeLabel = ''; ClaudeEventAt = ''
+        ClaudeSince = ''; ClaudeEnded = ''; ClaudeStep = 0; ClaudeDoing = ''; ClaudeProject = '' }
     if (-not (Test-Path $claudePath)) { return $idle }
     try {
         $s = Get-Content $claudePath -Raw | ConvertFrom-Json
@@ -110,6 +111,12 @@ function Get-ClaudeInfo {
         $info = $idle.Clone()
         $info.ClaudeState = [int](@{ working = 1; needs_you = 2; done = 3 }[[string]$s.state])
         if ($claudeModes.ContainsKey([string]$s.mode)) { $info.ClaudeMode = $claudeModes[[string]$s.mode] }
+        # the Claude panel: turn start/end (ms), step 0-4, last file or command, project folder
+        $info.ClaudeSince = [string]$s.since_ms
+        $info.ClaudeEnded = [string]$s.ended_ms
+        $info.ClaudeStep = [int]$s.step
+        $info.ClaudeDoing = ([string]$s.doing) -replace '[\r\n]', ' '
+        $info.ClaudeProject = ([string]$s.project) -replace '[\r\n]', ' '
         if (($nowMs - $s.changed_ms) -lt 8000) {
             $info.ClaudeEventAt = [string]$s.changed_ms
             switch ($s.change) {
@@ -214,7 +221,12 @@ function Write-NowPlaying {
         [int]$ClaudeEvent = 0,
         [string]$ClaudeLabel = '',
         [string]$ClaudeEventAt = '',
-        [string]$Cover = ''
+        [string]$Cover = '',
+        [string]$ClaudeSince = '',
+        [string]$ClaudeEnded = '',
+        [int]$ClaudeStep = 0,
+        [string]$ClaudeDoing = '',
+        [string]$ClaudeProject = ''
     )
     @(
         "Track=$Track"
@@ -234,6 +246,11 @@ function Write-NowPlaying {
         "ClaudeLabel=$ClaudeLabel"
         "ClaudeEventAt=$ClaudeEventAt"
         "Cover=$Cover"
+        "ClaudeSince=$ClaudeSince"
+        "ClaudeEnded=$ClaudeEnded"
+        "ClaudeStep=$ClaudeStep"
+        "ClaudeDoing=$ClaudeDoing"
+        "ClaudeProject=$ClaudeProject"
     ) | Set-Content -Path $outInc -Encoding utf8
 }
 

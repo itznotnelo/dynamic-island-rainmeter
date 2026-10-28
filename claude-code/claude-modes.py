@@ -7,6 +7,11 @@ Every hook event updates one file per session, then one combined status file:
         change      needs_you | done | mode              (last transition worth a popup)
         changed_ms  when that happened
         until_ms    after this the status counts as idle (a session that died silently)
+        since_ms    when the current turn started (the prompt was sent)
+        ended_ms    when it finished (0 while it runs)
+        step        0 thinking, 1 reading, 2 editing, 3 testing, 4 done (furthest this turn)
+        doing       the last file or command it touched, one short line
+        project     folder name of the session's working directory
 The island's poller (NowPlaying.ps1) reads it every second.
 
 The keyboard only hears about transitions (needs_you, done, clear), because every
@@ -16,6 +21,7 @@ Never prints anything: stdout of SessionStart/UserPromptSubmit hooks lands in Cl
 """
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -28,9 +34,12 @@ STATUS = DIR / 'status.json'
 KEYBOARD = 'http://127.0.0.1:7075/api/claude'
 
 RANK = {'idle': 0, 'done': 1, 'working': 2, 'needs_you': 3}
-STALE = {'idle': 0, 'done': 10 * 60, 'working': 30 * 60, 'needs_you': 4 * 3600}  # seconds
+STALE = {'idle': 0, 'done': 12 * 3600, 'working': 30 * 60, 'needs_you': 4 * 3600}  # seconds; done stays until you look
 ASKS_USER = ('AskUserQuestion', 'ExitPlanMode')
 PROMPTS = ('permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog', 'agent_needs_input')
+READS = ('Read', 'Grep', 'Glob', 'LS', 'WebFetch', 'WebSearch', 'NotebookRead')
+EDITS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
+TESTS = re.compile(r'\b(test|tests|pytest|jest|vitest|mocha|tsc|lint|eslint|build|cargo|make|unittest)\b')
 
 
 def event_state(inp):
@@ -50,6 +59,29 @@ def event_state(inp):
     if ev == 'SessionEnd':
         return 'end'
     return None
+
+
+def short(text, n=60):
+    text = ' '.join(str(text).split())                   # one line for the island
+    return text if len(text) <= n else text[:n - 3] + '...'
+
+
+def activity(inp):
+    """(step, what) for a finished tool: the island's Read / Edit / Test row and its one-liner."""
+    tool, ti = inp.get('tool_name', ''), inp.get('tool_input') or {}
+    path = ti.get('file_path') or ti.get('notebook_path') or ''
+    name = os.path.basename(str(path).replace('\\', '/'))
+    if tool in EDITS:
+        return 2, name or tool
+    if tool == 'Bash':
+        cmd = str(ti.get('command', '')).strip()
+        return (3 if TESTS.search(cmd) else 0), '$ ' + short(cmd.splitlines()[0] if cmd else '', 50)
+    if tool in READS:
+        what = name or ti.get('pattern') or ti.get('query') or ti.get('url') or tool
+        return 1, short(what, 50)
+    if tool in ('Task', 'Agent'):
+        return 1, short(ti.get('description') or tool, 50)
+    return 0, tool
 
 
 def read(path, default):
@@ -112,7 +144,18 @@ def main():
         return  # async hooks can finish out of order: a later event already wrote this session
     else:
         mode = inp.get('permission_mode') or old.get('mode') or 'default'
-        write(f, {'state': state, 'mode': mode, 'ts': now})
+        rec = {'state': state, 'mode': mode, 'ts': now, 'since': old.get('since', now), 'ended': 0,
+               'step': old.get('step', 0), 'doing': old.get('doing', ''),
+               'project': os.path.basename(str(inp.get('cwd') or '').replace('\\', '/').rstrip('/')) or old.get('project', '')}
+        ev = inp.get('hook_event_name')
+        if ev == 'UserPromptSubmit':                        # a new turn: timer and steps start over
+            rec.update(since=now, step=0, doing='')
+        elif ev == 'PostToolUse':
+            step, what = activity(inp)
+            rec['step'], rec['doing'] = max(rec['step'], step, 1), what
+        elif ev == 'Stop':
+            rec.update(step=4, ended=now)
+        write(f, rec)
 
     prev = read(STATUS, {})
     top = combined(now, prev.get('session')) or {'state': 'idle', 'mode': 'default', 'ts': now, 'sid': ''}
@@ -123,6 +166,11 @@ def main():
         'change': prev.get('change', ''),
         'changed_ms': prev.get('changed_ms', 0),
         'until_ms': int((top['ts'] + STALE[top['state']]) * 1000),
+        'since_ms': int(top.get('since', top['ts']) * 1000),
+        'ended_ms': int(top.get('ended', 0) * 1000),
+        'step': top.get('step', 0),
+        'doing': top.get('doing', ''),
+        'project': top.get('project', ''),
     }
     was = prev.get('state', 'idle')
     change = ''

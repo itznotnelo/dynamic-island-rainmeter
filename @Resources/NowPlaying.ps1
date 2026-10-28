@@ -1,5 +1,6 @@
 # Dynamic Island - Windows system poller
-# Run periodically by Rainmeter (Plugin=RunCommand). Reports now-playing
+# Started once by Rainmeter (-Action Loop, one copy, quits with Rainmeter): polls every
+# 0.5 s and rewrites NowPlaying.inc only when something changed. Reports now-playing
 # media (via SMTC), battery status, mic/camera privacy indicators and the
 # Claude Code state (from the claude-modes hook) - no API keys, no browser
 # extension, no extra installs.
@@ -13,10 +14,13 @@
 # Battery/privacy both use classic WMI/registry (not WinRT) and are
 # reliable in this environment, unlike the thumbnail stream above.
 #
-# Usage: NowPlaying.ps1 [-Action Status|PlayPause|Next|Previous]
+# Usage: NowPlaying.ps1 [-Action Loop|Status|PlayPause|Next|Previous]
+#   Loop       the poller (what the skin runs)
+#   Status     one poll, then exit
+#   PlayPause, Next, Previous   a media key; the loop shows the result on its next poll
 
 param(
-    [ValidateSet('Status', 'PlayPause', 'Next', 'Previous')]
+    [ValidateSet('Loop', 'Status', 'PlayPause', 'Next', 'Previous')]
     [string]$Action = 'Status'
 )
 
@@ -33,11 +37,14 @@ $statePath  = Join-Path $here 'EventState.json'
 $coverState = Join-Path $here 'CoverState.json'
 $coverPy    = Join-Path $here 'cover.py'
 
+$script:cover = $null   # kept in memory by the loop; the file only carries it across restarts
+
 function Update-Cover {
     param([string]$Key, [string]$Title = '', [string]$Artist = '', [long]$DurationMs = 0)
-    $st = $null
-    if (Test-Path $coverState) { try { $st = Get-Content $coverState -Raw | ConvertFrom-Json } catch { } }
+    $st = $script:cover
+    if (-not $st -and (Test-Path $coverState)) { try { $st = Get-Content $coverState -Raw | ConvertFrom-Json } catch { } }
     if (-not $st) { $st = [pscustomobject]@{ Key = ''; Slot = 1; Tries = 0 } }
+    $script:cover = $st
     if ($st.Key -ne $Key) {
         $st.Key = $Key; $st.Slot = 1 - $st.Slot; $st.Tries = 0
     } elseif ($st.Tries -ge 5) {
@@ -146,8 +153,8 @@ function Get-EventCode {
     param([int]$CurrentStatus, [int]$CurrentPercent, [int]$CurrentCharging)
 
     $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    $prev = $null
-    if (Test-Path $statePath) {
+    $prev = $script:evState
+    if (-not $prev -and (Test-Path $statePath)) {
         try { $prev = Get-Content $statePath -Raw | ConvertFrom-Json } catch { $prev = $null }
     }
 
@@ -194,7 +201,12 @@ function Get-EventCode {
     }
 
     $state.LastStatus = $CurrentStatus
-    ($state | ConvertTo-Json) | Set-Content -Path $statePath -Encoding utf8
+    $json = $state | ConvertTo-Json -Compress
+    if ($json -ne $script:evJson) {   # the file only changes when the state does
+        $script:evJson = $json
+        $json | Set-Content -Path $statePath -Encoding utf8
+    }
+    $script:evState = [pscustomobject]$state
 
     if ($state.ChangeAt -gt 0 -and ($nowMs - $state.ChangeAt) -lt 8000) {
         return $state.ChangeType
@@ -228,7 +240,7 @@ function Write-NowPlaying {
         [string]$ClaudeDoing = '',
         [string]$ClaudeProject = ''
     )
-    @(
+    $lines = @(
         "Track=$Track"
         "Artist=$Artist"
         "IsPlaying=$IsPlaying"
@@ -251,18 +263,25 @@ function Write-NowPlaying {
         "ClaudeStep=$ClaudeStep"
         "ClaudeDoing=$ClaudeDoing"
         "ClaudeProject=$ClaudeProject"
-    ) | Set-Content -Path $outInc -Encoding utf8
+    )
+    $text = ($lines -join "`r`n") + "`r`n"
+    # unchanged, or only the position moved on as expected while playing (the island carries the
+    # position forward itself): no disk write. A seek or a pause still writes.
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $rest = $text -replace 'ProgressMs=\d*', ''
+    if ($rest -eq $script:lastRest) {
+        $expected = $script:lastPos + $(if ($IsPlaying -eq 1) { $nowMs - $script:lastAt } else { 0 })
+        if ([Math]::Abs($ProgressMs - $expected) -lt 1500) { return }
+    }
+    $tmp = "$outInc.tmp"
+    try {
+        [IO.File]::WriteAllText($tmp, $text, (New-Object Text.UTF8Encoding $true))
+        if (Test-Path $outInc) { [IO.File]::Replace($tmp, $outInc, $null) } else { [IO.File]::Move($tmp, $outInc) }
+        $script:lastRest, $script:lastPos, $script:lastAt = $rest, $ProgressMs, $nowMs
+    } catch { }   # the skin is reading it right now: the next poll writes it
 }
 
-# === Gather system state (independent of media session) ===
-
-$batteryInfo = Get-BatteryInfo
-$micActive = [int](Test-CapabilityActive -Capability 'microphone')
-$camActive = [int](Test-CapabilityActive -Capability 'webcam')
-$eventCode = Get-EventCode -CurrentStatus $batteryInfo.Status -CurrentPercent $batteryInfo.Percent -CurrentCharging $batteryInfo.Charging
-$claudeInfo = Get-ClaudeInfo
-
-# === SMTC now-playing (independent of the above) ===
+# === WinRT media session manager (loaded once) ===
 
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime] | Out-Null
@@ -278,57 +297,102 @@ function Wait-WinRT($WinRtOperation, [type]$ResultType) {
     return $task.Result
 }
 
-$commonArgs = @{
-    BatteryPercent = $batteryInfo.Percent; BatteryCharging = $batteryInfo.Charging
-    MicActive = $micActive; CamActive = $camActive; EventCode = $eventCode
-} + $claudeInfo
-
-try {
-    $sessionManager = Wait-WinRT ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) `
-        ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
-    $session = $sessionManager.GetCurrentSession()
-} catch {
-    Write-NowPlaying @commonArgs
-    return
-}
-
-if (-not $session) {
-    Write-NowPlaying @commonArgs
-    return
-}
-
-if ($Action -ne 'Status') {
-    try {
-        switch ($Action) {
-            'PlayPause' { $session.TryTogglePlayPauseAsync() | Out-Null }
-            'Next'      { $session.TrySkipNextAsync() | Out-Null }
-            'Previous'  { $session.TrySkipPreviousAsync() | Out-Null }
-        }
-        Start-Sleep -Milliseconds 300
-    } catch { }
-}
-
-try {
-    $props = Wait-WinRT ($session.TryGetMediaPropertiesAsync()) `
-        ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
-    $playbackInfo = $session.GetPlaybackInfo()
-    $timeline = $session.GetTimelineProperties()
-
-    $isPlaying = [int]($playbackInfo.PlaybackStatus.ToString() -eq 'Playing')
-    $positionMs = [long]$timeline.Position.TotalMilliseconds
-    # SMTC only refreshes the position on play/pause/seek: carry it forward from when it was taken
-    if ($isPlaying -eq 1 -and $timeline.LastUpdatedTime.Year -gt 2000) {
-        $positionMs += [long]([DateTimeOffset]::Now - $timeline.LastUpdatedTime).TotalMilliseconds
+function Get-Session {
+    if (-not $script:sessionManager) {
+        try {
+            $script:sessionManager = Wait-WinRT ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) `
+                ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+        } catch { return $null }
     }
-    $durationMs = [long]($timeline.EndTime - $timeline.StartTime).TotalMilliseconds
-
-    $cover = if ($props.Title) {
-        Update-Cover -Key "$($props.Title)|$($props.Artist)" -Title $props.Title -Artist $props.Artist -DurationMs $durationMs
-    } else { '' }
-
-    Write-NowPlaying @commonArgs -Track $props.Title -Artist $props.Artist -IsPlaying $isPlaying `
-        -ProgressMs $positionMs -DurationMs $durationMs -Cover $cover
-} catch {
-    Write-NowPlaying @commonArgs
+    try { return $script:sessionManager.GetCurrentSession() } catch { $script:sessionManager = $null; return $null }
 }
 
+# === One poll ===
+# Battery (WMI) every 5 s and mic/camera (registry) every second: both are slower to ask than
+# the rest and change rarely. Claude and the media session every poll.
+
+$script:tick = 0
+$script:battery = $null
+$script:privacy = @{ MicActive = 0; CamActive = 0 }
+
+function Invoke-Poll {
+    if (-not $script:battery -or $script:tick % 10 -eq 0) { $script:battery = Get-BatteryInfo }
+    if ($script:tick % 2 -eq 0) {
+        $script:privacy = @{
+            MicActive = [int](Test-CapabilityActive -Capability 'microphone')
+            CamActive = [int](Test-CapabilityActive -Capability 'webcam')
+        }
+    }
+    $script:tick++
+    $b = $script:battery
+    $eventCode = Get-EventCode -CurrentStatus $b.Status -CurrentPercent $b.Percent -CurrentCharging $b.Charging
+    $commonArgs = @{
+        BatteryPercent = $b.Percent; BatteryCharging = $b.Charging
+        MicActive = $script:privacy.MicActive; CamActive = $script:privacy.CamActive; EventCode = $eventCode
+    } + (Get-ClaudeInfo)
+
+    $session = Get-Session
+    if (-not $session) {
+        Write-NowPlaying @commonArgs
+        return
+    }
+    try {
+        $props = Wait-WinRT ($session.TryGetMediaPropertiesAsync()) `
+            ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+        $playbackInfo = $session.GetPlaybackInfo()
+        $timeline = $session.GetTimelineProperties()
+
+        $isPlaying = [int]($playbackInfo.PlaybackStatus.ToString() -eq 'Playing')
+        $positionMs = [long]$timeline.Position.TotalMilliseconds
+        # SMTC only refreshes the position on play/pause/seek: carry it forward from when it was taken
+        if ($isPlaying -eq 1 -and $timeline.LastUpdatedTime.Year -gt 2000) {
+            $positionMs += [long]([DateTimeOffset]::Now - $timeline.LastUpdatedTime).TotalMilliseconds
+        }
+        $durationMs = [long]($timeline.EndTime - $timeline.StartTime).TotalMilliseconds
+
+        $cover = if ($props.Title) {
+            Update-Cover -Key "$($props.Title)|$($props.Artist)" -Title $props.Title -Artist $props.Artist -DurationMs $durationMs
+        } else { '' }
+
+        Write-NowPlaying @commonArgs -Track $props.Title -Artist $props.Artist -IsPlaying $isPlaying `
+            -ProgressMs $positionMs -DurationMs $durationMs -Cover $cover
+    } catch {
+        $script:sessionManager = $null   # a stale manager: ask Windows again next time
+        Write-NowPlaying @commonArgs
+    }
+}
+
+# === Main ===
+
+if ($Action -in 'PlayPause', 'Next', 'Previous') {
+    $session = Get-Session
+    if ($session) {
+        try {
+            switch ($Action) {
+                'PlayPause' { $session.TryTogglePlayPauseAsync() | Out-Null }
+                'Next'      { $session.TrySkipNextAsync() | Out-Null }
+                'Previous'  { $session.TrySkipPreviousAsync() | Out-Null }
+            }
+        } catch { }
+    }
+    return
+}
+
+if ($Action -eq 'Status') {
+    Invoke-Poll
+    return
+}
+
+# Loop: one copy only, and it ends with Rainmeter
+$created = $false
+$mutex = New-Object Threading.Mutex($true, 'DynamicIsland-nowplaying', [ref]$created)
+if (-not $created) { return }
+$ErrorActionPreference = 'Continue'
+$n = 0
+while ($true) {
+    if ($n % 20 -eq 0 -and -not (Get-Process -Name Rainmeter -ErrorAction SilentlyContinue)) { break }
+    $n++
+    try { Invoke-Poll } catch { }
+    Start-Sleep -Milliseconds 500
+}
+$mutex.ReleaseMutex()

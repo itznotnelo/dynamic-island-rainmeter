@@ -1,4 +1,6 @@
-"""Slow feeds for the Dynamic Island, run by the skin once a minute: python feeds.py
+"""Slow feeds for the Dynamic Island.
+    pythonw feeds.py loop     what the skin starts: one copy, refreshes every 30 s, quits with Rainmeter
+    python feeds.py           one refresh
 Actions from the island (then the feed is refreshed at once):
     python feeds.py act answer <question id> <option index>
     python feeds.py act pomo <minutes>
@@ -199,16 +201,14 @@ def weather(cfg, out):
         out['Temp'], out['WxIcon'] = str(cached['temp']), cached['icon']
 
 
-def main():
+def config():
     try:
-        cfg = json.loads((HERE / 'Feeds.local.json').read_text(encoding='utf-8'))
+        return json.loads((HERE / 'Feeds.local.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
-        cfg = {}
-    if sys.argv[1:2] == ['act'] and len(sys.argv) > 2:
-        try:
-            act(cfg, sys.argv[2], sys.argv[3:])
-        except Exception:
-            pass                       # the refreshed feed shows whether it worked
+        return {}
+
+
+def refresh(cfg):
     out = dict.fromkeys(KEYS, '')
     hq(cfg, out)
     weather(cfg, out)
@@ -225,9 +225,54 @@ def main():
     shop_flash(out, state)
     STATE.write_text(json.dumps(state), encoding='utf-8')
     text = ''.join(f"{k}={' '.join(out[k].split())}\n" for k in KEYS)
-    tmp = OUT.with_suffix('.tmp')
+    try:
+        if OUT.read_text(encoding='utf-8-sig') == text:
+            return                     # unchanged: no disk write
+    except OSError:
+        pass
+    tmp = OUT.with_suffix(f'.{os.getpid()}.tmp')
     tmp.write_text(text, encoding='utf-8-sig')
-    os.replace(tmp, OUT)
+    for _ in range(10):
+        try:
+            return os.replace(tmp, OUT)
+        except PermissionError:        # the skin is reading it right now
+            time.sleep(0.05)
+    tmp.unlink(missing_ok=True)
+
+
+def rainmeter_running():
+    import subprocess
+    out = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq Rainmeter.exe', '/NH'], capture_output=True, text=True,
+                         creationflags=0x08000000).stdout             # CREATE_NO_WINDOW
+    return 'rainmeter.exe' in out.lower()
+
+
+def loop():
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    k32.CreateMutexW(None, False, 'DynamicIsland-feeds')
+    if k32.GetLastError() == 183:      # ERROR_ALREADY_EXISTS: another copy runs
+        return
+    n = 0
+    while n % 10 or rainmeter_running():    # ask about Rainmeter every 5 minutes
+        n += 1
+        try:
+            refresh(config())
+        except Exception:
+            pass                       # a network hiccup: the next round tries again
+        time.sleep(30)
+
+
+def main():
+    if sys.argv[1:2] == ['loop']:
+        return loop()
+    cfg = config()
+    if sys.argv[1:2] == ['act'] and len(sys.argv) > 2:
+        try:
+            act(cfg, sys.argv[2], sys.argv[3:])
+        except Exception:
+            pass                       # the refreshed feed shows whether it worked
+    refresh(cfg)
 
 
 if __name__ == '__main__':

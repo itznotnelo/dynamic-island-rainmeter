@@ -43,7 +43,7 @@ nothing moves, the skin does almost no work.
 
 ## Feeds (optional)
 
-`@Resources\feeds.py` runs once a minute and reads `@Resources\Feeds.local.json`, which stays out of git:
+`@Resources\feeds.py` runs in the background, refreshes every 30 seconds and reads `@Resources\Feeds.local.json`, which stays out of git:
 
 ```json
 {
@@ -96,7 +96,7 @@ Setup:
 2. Merge the `hooks` block from `claude-code/hooks.json` into `~/.claude/settings.json`, then open
    `/hooks` once in Claude Code (or restart it) so it picks them up.
 
-The hook writes `~/.claude/claude-modes/status.json`, which `NowPlaying.ps1` reads every second. The
+The hook writes `~/.claude/claude-modes/status.json`, which `NowPlaying.ps1` reads twice a second. The
 hooks run in the background, so Claude never waits for them. Without the hook the bubble stays hidden.
 
 ## How it works
@@ -104,7 +104,7 @@ hooks run in the background, so Claude never waits for them. Without the hook th
 - `DynamicIsland.ini`: the measures and meters. Everything inside the notch is clipped to its shape.
 - `@Resources\Island.lua`: the springs, fades, title marquee and visualizer smoothing. It hands its
   results to the meters as variables and redraws only when something changed. It is saved as UTF-16, which makes Rainmeter hand it text as Unicode (song titles in any script, symbols).
-- `@Resources\NowPlaying.ps1`: once a second reads the media session (SMTC), battery (WMI), microphone
+- `@Resources\NowPlaying.ps1`: one background PowerShell that, twice a second, reads the media session (SMTC), battery (WMI), microphone
   and camera use (registry) and the Claude Code status, and writes `NowPlaying.inc` for the skin.
 - `@Resources\cover.py`: on each new track reads the cover from the media session (WinRT) and renders
   the rounded tiles and the blurred glow behind the player (Pillow).

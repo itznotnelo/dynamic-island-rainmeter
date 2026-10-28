@@ -176,11 +176,21 @@ def fmt(seconds):
     return f'{m // 60} h {m % 60:02d}' if m >= 60 else f'{m} min'
 
 
+_last = None
+
+
 def write(state):
+    global _last
     text = ''.join(f"{k}={' '.join(str(state.get(k, '')).split())}\n" for k in KEYS)
+    if text == _last:
+        return                         # unchanged: no disk write
     tmp = OUT.with_suffix('.tmp')
     tmp.write_text(text, encoding='utf-8-sig')
-    os.replace(tmp, OUT)
+    try:
+        os.replace(tmp, OUT)
+        _last = text
+    except PermissionError:            # the skin is reading it right now: next round
+        pass
 
 
 def main():

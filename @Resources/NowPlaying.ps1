@@ -276,7 +276,7 @@ function Write-NowPlaying {
     $tmp = "$outInc.tmp"
     try {
         [IO.File]::WriteAllText($tmp, $text, (New-Object Text.UTF8Encoding $true))
-        if (Test-Path $outInc) { [IO.File]::Replace($tmp, $outInc, $null) } else { [IO.File]::Move($tmp, $outInc) }
+        if (Test-Path $outInc) { [IO.File]::Replace($tmp, $outInc, [NullString]::Value) } else { [IO.File]::Move($tmp, $outInc) }
         $script:lastRest, $script:lastPos, $script:lastAt = $rest, $ProgressMs, $nowMs
     } catch { }   # the skin is reading it right now: the next poll writes it
 }

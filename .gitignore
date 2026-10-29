@@ -23,3 +23,6 @@
 @Resources/Cover.txt
 @Resources/Cover.tmp
 @Resources/measure-*.txt
+tools/guard.log
+tools/guard.state
+tools/guard.off

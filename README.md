@@ -110,6 +110,9 @@ hooks run in the background, so Claude never waits for them. Without the hook th
 - `@Resources\cover.py watch`: a background Python that Windows tells about every music change. On a new
   track it renders the rounded tiles and the blurred glow behind the player (Pillow) right away, then
   wakes `NowPlaying.ps1`. Without it, `NowPlaying.ps1` polls twice a second and runs `cover.py` per track.
+- `tools\island_guard.py`: optional guard (install once with `tools\install-guard.ps1`). Every 10 minutes and at logon it
+  starts Rainmeter, loads the island or refreshes it when it was switched off or its poller died. A `guard.off`
+  file next to it pauses it.
 - `tools\measure-island.ps1`: logs the CPU, RAM and file writes of Rainmeter and these helpers for a few
   minutes, to compare before and after a change.
 

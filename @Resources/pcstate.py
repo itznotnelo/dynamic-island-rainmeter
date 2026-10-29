@@ -5,7 +5,7 @@ and writes PcState.inc every 2 seconds:
     MicMuted    the default microphone's mute
     Screen*     today's screen time (only while you're at the PC) and the top 3 apps
     Gpu*        temperature and load from nvidia-smi
-    Net, Ping   internet reachable, and the time to connect to 1.1.1.1 in ms
+    Net, Ping   internet reachable, and the time to connect to 1.1.1.1 in ms (5 ms steps; GPU load in 5 % steps)
     Rec         1 while Mixxx records a set (its newest recording is still growing), RecSince
 Usage:  pythonw pcstate.py          the loop
         python pcstate.py micmute   toggle the microphone's mute
@@ -146,7 +146,8 @@ def gpu():
         out = subprocess.run(['nvidia-smi', '--query-gpu=temperature.gpu,utilization.gpu',
                               '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=5,
                              creationflags=NO_WINDOW).stdout.split(',')
-        return out[0].strip(), out[1].strip()
+        load = out[1].strip()                        # in 5 % steps: the file only changes when it shows
+        return out[0].strip(), str(5 * round(int(load) / 5)) if load.isdigit() else load
     except (OSError, IndexError, subprocess.SubprocessError):
         return '', ''
 
@@ -156,7 +157,8 @@ def internet():
         t = time.perf_counter()
         try:
             socket.create_connection((host, port), timeout=2).close()
-            return 1, round((time.perf_counter() - t) * 1000)
+            ms = (time.perf_counter() - t) * 1000         # in 5 ms steps (10 above 100): small jitter isn't news
+            return 1, 5 * round(ms / 5) if ms < 100 else 10 * round(ms / 10)
         except OSError:
             continue
     return 0, ''

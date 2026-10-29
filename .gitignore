@@ -26,3 +26,4 @@
 tools/guard.log
 tools/guard.state
 tools/guard.off
+__pycache__/

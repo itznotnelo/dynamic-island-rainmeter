@@ -27,3 +27,4 @@ tools/guard.log
 tools/guard.state
 tools/guard.off
 __pycache__/
+@Resources/FeedsTest.json

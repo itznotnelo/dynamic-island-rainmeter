@@ -27,6 +27,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 OUT = HERE / 'Feeds.inc'
 WEATHER = HERE / 'Weather.json'
+TEST = HERE / 'FeedsTest.json'      # `feeds.py test`: made-up alerts for 5 minutes, to try them on the island
 STATE = HERE / 'FeedsState.json'     # what was already handled: phone-music cover, shop alarm flash
 KEYS = ['HqOk', 'Approvals', 'Approval', 'Questions', 'Question', 'Incidents', 'Incident', 'Down',
         'DownNames', 'Todo', 'TodoDue', 'TodoOverdue', 'Temp', 'WxIcon', 'HqUrl', 'Leave', 'LeaveFor',
@@ -223,6 +224,14 @@ def refresh(cfg):
     except Exception:
         pass
     shop_flash(out, state)
+    try:
+        test = json.loads(TEST.read_text(encoding='utf-8'))
+        if time.time() < test['until']:
+            out.update(test['values'])
+        else:
+            TEST.unlink()
+    except (OSError, ValueError, KeyError):
+        pass
     STATE.write_text(json.dumps(state), encoding='utf-8')
     text = ''.join(f"{k}={' '.join(out[k].split())}\n" for k in KEYS)
     try:
@@ -277,9 +286,22 @@ def home_state(entity):
     return ''
 
 
+def test_mode():
+    """Shift, shop and upload alerts at once, plus a question and a chore to tap (fake ids: HQ ignores them)."""
+    now = time.strftime('%Y-%m-%dT%H:%M:%S')
+    TEST.write_text(json.dumps({'until': time.time() + 300, 'values': {
+        'Shift': 'TEST shift 17:00', 'ShiftIn': '30', 'Wear': 'black shirt',
+        'ShopAlarm': 'TEST order waiting', 'ShopAlarmAt': now,
+        'Upload': 'TEST photo.jpg -> Nextcloud', 'UploadAt': now,
+        'Questions': '1', 'Question': 'TEST: does answering work?', 'QuestionId': 'test', 'QuestionOptions': 'Yes || No',
+        'Chore': 'TEST chore', 'ChoreId': 'test'}}), encoding='utf-8')
+
+
 def main():
     if sys.argv[1:2] == ['loop']:
         return loop()
+    if sys.argv[1:2] == ['test']:
+        test_mode()
     cfg = config()
     if sys.argv[1:2] == ['act'] and len(sys.argv) > 2:
         toggled = sys.argv[3] if sys.argv[2] == 'toggle' and len(sys.argv) > 3 else None

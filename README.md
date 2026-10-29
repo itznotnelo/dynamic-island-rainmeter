@@ -113,6 +113,8 @@ hooks run in the background, so Claude never waits for them. Without the hook th
 - `tools\island_guard.py`: optional guard (install once with `tools\install-guard.ps1`). Every 10 minutes and at logon it
   starts Rainmeter, loads the island or refreshes it when it was switched off or its poller died. A `guard.off`
   file next to it pauses it.
+- `python @Resources\feeds.py test`: for 5 minutes, made-up shift, shop and upload alerts plus a question and a
+  chore to tap (fake ids, so HQ ignores the taps), to try them on the island.
 - `tools\measure-island.ps1`: logs the CPU, RAM and file writes of Rainmeter and these helpers for a few
   minutes, to compare before and after a change.
 

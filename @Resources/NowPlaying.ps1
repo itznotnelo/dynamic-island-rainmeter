@@ -1,6 +1,8 @@
 # Dynamic Island - Windows system poller
 # Started once by Rainmeter (-Action Loop, one copy, quits with Rainmeter): polls every
-# 0.5 s and rewrites NowPlaying.inc only when something changed. Reports now-playing
+# second and rewrites NowPlaying.inc only when something changed. The music is only asked
+# for when the cover watcher (cover.py watch, started from here) says it changed, and every
+# 5 s to be safe; without the watcher it polls every 0.5 s as before. Reports now-playing
 # media (via SMTC), battery status, mic/camera privacy indicators and the
 # Claude Code state (from the claude-modes hook) - no API keys, no browser
 # extension, no extra installs.
@@ -36,6 +38,21 @@ $statePath  = Join-Path $here 'EventState.json'
 
 $coverState = Join-Path $here 'CoverState.json'
 $coverPy    = Join-Path $here 'cover.py'
+$coverTxt   = Join-Path $here 'Cover.txt'      # the watcher's latest art: "title|artist", then the slot
+
+function Test-Watcher {
+    try { [Threading.Mutex]::OpenExisting('DynamicIsland-cover').Dispose(); return $true } catch { return $false }
+}
+
+function Start-Watcher {
+    try { Start-Process pythonw -ArgumentList @("`"$coverPy`"", 'watch', "`"$here`"") -WindowStyle Hidden } catch { }
+}
+
+function Get-WatcherCover([string]$Key) {
+    try { $c = [IO.File]::ReadAllLines($coverTxt) } catch { return $null }
+    if ($c.Count -ge 2 -and $c[0] -eq $Key) { return $c[1] }
+    return $null
+}
 
 $script:cover = $null   # kept in memory by the loop; the file only carries it across restarts
 
@@ -308,34 +325,21 @@ function Get-Session {
 }
 
 # === One poll ===
-# Battery (WMI) every 5 s and mic/camera (registry) every second: both are slower to ask than
-# the rest and change rarely. Claude and the media session every poll.
+# Battery (WMI) every 10 polls and mic/camera (registry) every second: both are slower to ask than
+# the rest and change rarely. Claude every poll, the media session when it's due (see the loop).
 
 $script:tick = 0
 $script:battery = $null
 $script:privacy = @{ MicActive = 0; CamActive = 0 }
+$script:watcher = $false     # cover.py watch runs: it says when the music changed
+$script:mediaDue = $true     # ask Windows about the music on this poll
+$script:media = $null        # the last answer, and when it came
+$script:mediaAt = 0
+$script:lastCover = ''
 
-function Invoke-Poll {
-    if (-not $script:battery -or $script:tick % 10 -eq 0) { $script:battery = Get-BatteryInfo }
-    if ($script:tick % 2 -eq 0) {
-        $script:privacy = @{
-            MicActive = [int](Test-CapabilityActive -Capability 'microphone')
-            CamActive = [int](Test-CapabilityActive -Capability 'webcam')
-        }
-    }
-    $script:tick++
-    $b = $script:battery
-    $eventCode = Get-EventCode -CurrentStatus $b.Status -CurrentPercent $b.Percent -CurrentCharging $b.Charging
-    $commonArgs = @{
-        BatteryPercent = $b.Percent; BatteryCharging = $b.Charging
-        MicActive = $script:privacy.MicActive; CamActive = $script:privacy.CamActive; EventCode = $eventCode
-    } + (Get-ClaudeInfo)
-
+function Get-Media {
     $session = Get-Session
-    if (-not $session) {
-        Write-NowPlaying @commonArgs
-        return
-    }
+    if (-not $session) { return @{} }
     try {
         $props = Wait-WinRT ($session.TryGetMediaPropertiesAsync()) `
             ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
@@ -350,16 +354,53 @@ function Invoke-Poll {
         }
         $durationMs = [long]($timeline.EndTime - $timeline.StartTime).TotalMilliseconds
 
-        $cover = if ($props.Title) {
-            Update-Cover -Key "$($props.Title)|$($props.Artist)" -Title $props.Title -Artist $props.Artist -DurationMs $durationMs
-        } else { '' }
-
-        Write-NowPlaying @commonArgs -Track $props.Title -Artist $props.Artist -IsPlaying $isPlaying `
-            -ProgressMs $positionMs -DurationMs $durationMs -Cover $cover
+        $cover = ''
+        if ($props.Title) {
+            $key = "$($props.Title)|$($props.Artist)"
+            if ($script:watcher) {
+                # the watcher draws the art itself; until it's done the last art stays
+                $slot = Get-WatcherCover $key
+                $cover = if ($null -ne $slot) { $slot } else { $script:lastCover }
+            } else {
+                $cover = Update-Cover -Key $key -Title $props.Title -Artist $props.Artist -DurationMs $durationMs
+            }
+        }
+        $script:lastCover = $cover
+        return @{ Track = $props.Title; Artist = $props.Artist; IsPlaying = $isPlaying
+            ProgressMs = $positionMs; DurationMs = $durationMs; Cover = $cover }
     } catch {
         $script:sessionManager = $null   # a stale manager: ask Windows again next time
-        Write-NowPlaying @commonArgs
+        return @{}
     }
+}
+
+function Invoke-Poll {
+    if (-not $script:battery -or $script:tick % 10 -eq 0) { $script:battery = Get-BatteryInfo }
+    if ($script:watcher -or $script:tick % 2 -eq 0) {   # once a second
+        $script:privacy = @{
+            MicActive = [int](Test-CapabilityActive -Capability 'microphone')
+            CamActive = [int](Test-CapabilityActive -Capability 'webcam')
+        }
+    }
+    $script:tick++
+    $b = $script:battery
+    $eventCode = Get-EventCode -CurrentStatus $b.Status -CurrentPercent $b.Percent -CurrentCharging $b.Charging
+    $commonArgs = @{
+        BatteryPercent = $b.Percent; BatteryCharging = $b.Charging
+        MicActive = $script:privacy.MicActive; CamActive = $script:privacy.CamActive; EventCode = $eventCode
+    } + (Get-ClaudeInfo)
+
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    if ($script:mediaDue -or $null -eq $script:media) {
+        $script:media = Get-Media
+        $script:mediaAt = $nowMs
+        $m = $script:media
+    } else {
+        # nothing changed since: the last answer, its position carried forward
+        $m = $script:media.Clone()
+        if ($m.IsPlaying -eq 1) { $m.ProgressMs = [long]$m.ProgressMs + ($nowMs - $script:mediaAt) }
+    }
+    Write-NowPlaying @commonArgs @m
 }
 
 # === Main ===
@@ -388,11 +429,21 @@ $created = $false
 $mutex = New-Object Threading.Mutex($true, 'DynamicIsland-nowplaying', [ref]$created)
 if (-not $created) { return }
 $ErrorActionPreference = 'Continue'
+$kick = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::AutoReset, 'DynamicIsland-media')
 $n = 0
 while ($true) {
-    if ($n % 20 -eq 0 -and -not (Get-Process -Name Rainmeter -ErrorAction SilentlyContinue)) { break }
+    if ($n % 20 -eq 0) {
+        if (-not (Get-Process -Name Rainmeter -ErrorAction SilentlyContinue)) { break }
+        $script:watcher = Test-Watcher
+        if (-not $script:watcher -and $n % 120 -eq 0) { Start-Watcher }   # not more often: maybe no pythonw
+    }
     $n++
     try { Invoke-Poll } catch { }
-    Start-Sleep -Milliseconds 500
+    if ($script:watcher) {
+        $script:mediaDue = $kick.WaitOne(1000) -or ($n % 5 -eq 0)
+    } else {
+        Start-Sleep -Milliseconds 500
+        $script:mediaDue = $true
+    }
 }
 $mutex.ReleaseMutex()

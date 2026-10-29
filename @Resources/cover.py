@@ -1,9 +1,15 @@
 """Album art for the Dynamic Island.
 
 PowerShell 5.1 can read the track title from Windows' media session but not its
-thumbnail stream, so NowPlaying.ps1 calls this on every track change:
+thumbnail stream, so this draws the art. Two ways to run it:
 
+    pythonw cover.py watch <@Resources folder>
+        resident (one copy, quits with Rainmeter, started by NowPlaying.ps1): Windows tells it when
+        the music changes. A new track's art is drawn at once and noted in Cover.txt ("title|artist",
+        slot); every change also wakes NowPlaying.ps1 through the named event DynamicIsland-media,
+        so the poller doesn't have to ask Windows twice a second.
     python cover.py <@Resources folder> <slot> [--title T --artist A --duration MS] [--url IMAGE_URL]
+        one track (phone music, or the fallback when the watcher isn't running)
 
 For slot 0 or 1 (two slots, so Rainmeter loads the new image instead of its cached one):
     Art<slot>S.png   compact art, 24 px with radius 6 and a soft glow behind it (56x56)
@@ -25,6 +31,7 @@ import math
 import os
 import re
 import sys
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -36,12 +43,13 @@ GLOW_W, GLOW_H = 340, 120   # expanded island
 NOTCH_A = 0.92              # notch background opacity while expanded
 
 
-async def thumbnail():
-    from winrt.windows.media.control import \
-        GlobalSystemMediaTransportControlsSessionManager as Manager
+async def thumbnail(session=None):
     from winrt.windows.storage.streams import Buffer, DataReader, InputStreamOptions
 
-    session = (await Manager.request_async()).get_current_session()
+    if session is None:
+        from winrt.windows.media.control import \
+            GlobalSystemMediaTransportControlsSessionManager as Manager
+        session = (await Manager.request_async()).get_current_session()
     if session is None:
         return None
     ref = (await session.try_get_media_properties_async()).thumbnail
@@ -219,7 +227,121 @@ def save(img, path):
     os.replace(tmp, path)
 
 
+def draw(out, slot, art):
+    save(compact(art), out / f'Art{slot}S.png')
+    save(expanded(art), out / f'Art{slot}L.png')
+    save(ambient(art), out / f'Glow{slot}.png')
+    (out / f'Color{slot}.txt').write_text(tint(art), encoding='utf-8')
+
+
+def write_lyrics(out, slot, title, artist, duration):
+    lines = lyrics(title, artist, duration)
+    (out / f'Lyrics{slot}.txt').write_text(''.join(f'{ms}\t{t}\n' for ms, t in lines), encoding='utf-8')
+
+
+def rainmeter_running():
+    import subprocess
+    out = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq Rainmeter.exe', '/NH'], capture_output=True, text=True,
+                         creationflags=0x08000000).stdout             # CREATE_NO_WINDOW
+    return 'rainmeter.exe' in out.lower()
+
+
+def watch(out):
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    k32.CreateMutexW(None, False, 'DynamicIsland-cover')
+    if k32.GetLastError() == 183:      # ERROR_ALREADY_EXISTS: another copy runs
+        return
+    k32.CreateEventW.restype = ctypes.c_void_p
+    k32.SetEvent.argtypes = [ctypes.c_void_p]
+    kick = k32.CreateEventW(None, False, False, 'DynamicIsland-media')   # auto-reset, shared with NowPlaying.ps1
+    asyncio.run(_watch(Path(out), lambda: k32.SetEvent(kick)))
+
+
+async def _watch(out, kick):
+    from winrt.windows.media.control import \
+        GlobalSystemMediaTransportControlsSessionManager as Manager
+
+    loop = asyncio.get_running_loop()
+    changed, swapped = asyncio.Event(), [True]
+
+    def poke(*_):                      # Windows calls these on its own threads
+        loop.call_soon_threadsafe(changed.set)
+
+    def poke_session(*_):
+        swapped[0] = True
+        poke()
+
+    manager = await Manager.request_async()
+    manager.add_current_session_changed(poke_session)
+    changed.set()                      # hook the current player right away
+    hooked, tokens = None, []
+    key, slot, tries = '', 1, 99
+    try:                               # carry on where the last copy stopped, so the slots keep alternating
+        key, slot = (out / 'Cover.txt').read_text(encoding='utf-8').splitlines()[:2]
+        slot = int(slot)
+    except (OSError, ValueError):
+        key, slot = '', 1
+    checked = time.monotonic()
+    while True:
+        if time.monotonic() - checked > 60:     # ends with Rainmeter, even while the music keeps it busy
+            checked = time.monotonic()
+            if not await loop.run_in_executor(None, rainmeter_running):
+                return
+        try:                           # a missing thumbnail is asked for again a second later (5 times)
+            await asyncio.wait_for(changed.wait(), 1 if tries < 5 else 30)
+            changed.clear()
+        except asyncio.TimeoutError:
+            if tries >= 5:
+                continue
+        try:
+            session = manager.get_current_session()
+            if swapped[0]:             # a different player took over: listen to that one
+                swapped[0] = False
+                for ev, tok in tokens:
+                    try:
+                        getattr(hooked, 'remove_' + ev)(tok)
+                    except Exception:
+                        pass
+                hooked, tokens = session, []
+                if session is not None:
+                    for ev in ('media_properties_changed', 'playback_info_changed', 'timeline_properties_changed'):
+                        tokens.append((ev, getattr(session, 'add_' + ev)(poke)))
+            if session is None:
+                kick()
+                continue
+            props = await session.try_get_media_properties_async()
+            k = f'{props.title}|{props.artist}'
+            if not props.title or (k == key and tries >= 5):
+                kick()                 # play/pause/seek: the poller reads it now
+                continue
+            new = k != key
+            if new:
+                key, slot, tries = k, 1 - slot, 0
+            try:
+                art = await thumbnail(session)
+            except Exception:
+                art = None
+            await loop.run_in_executor(None, draw, out, slot, art)
+            if new:
+                try:
+                    tl = session.get_timeline_properties()
+                    dur = round((tl.end_time - tl.start_time).total_seconds() * 1000)
+                except Exception:
+                    dur = 0
+                await loop.run_in_executor(None, write_lyrics, out, slot, props.title, props.artist, dur)
+            tries = 99 if art is not None else tries + 1
+            tmp = out / 'Cover.tmp'
+            tmp.write_text(f'{key}\n{slot}\n', encoding='utf-8')
+            os.replace(tmp, out / 'Cover.txt')
+            kick()
+        except Exception:
+            await asyncio.sleep(1)     # Windows' media service hiccuped: look again next time
+
+
 def main():
+    if sys.argv[1:2] == ['watch'] and len(sys.argv) > 2:
+        return watch(sys.argv[2])
     ap = argparse.ArgumentParser()
     ap.add_argument('out')
     ap.add_argument('slot')
@@ -237,13 +359,9 @@ def main():
             art = asyncio.run(thumbnail())
     except Exception:
         art = None
-    save(compact(art), out / f'Art{slot}S.png')
-    save(expanded(art), out / f'Art{slot}L.png')
-    save(ambient(art), out / f'Glow{slot}.png')
-    (out / f'Color{slot}.txt').write_text(tint(art), encoding='utf-8')
+    draw(out, slot, art)
     if a.title:
-        lines = lyrics(a.title, a.artist, a.duration)
-        (out / f'Lyrics{slot}.txt').write_text(''.join(f'{ms}\t{t}\n' for ms, t in lines), encoding='utf-8')
+        write_lyrics(out, slot, a.title, a.artist, a.duration)
     return 0 if art is not None else 1
 
 

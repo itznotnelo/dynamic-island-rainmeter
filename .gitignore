@@ -20,3 +20,6 @@
 @Resources/Color*.txt
 @Resources/Lyrics*.txt
 @Resources/Vocab.local.txt
+@Resources/Cover.txt
+@Resources/Cover.tmp
+@Resources/measure-*.txt

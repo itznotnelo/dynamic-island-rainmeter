@@ -263,15 +263,38 @@ def loop():
         time.sleep(30)
 
 
+def home_state(entity):
+    """A Home tile's state as Feeds.inc has it right now ('' when it isn't there)."""
+    try:
+        for line in OUT.read_text(encoding='utf-8-sig').splitlines():
+            if line.startswith('Home='):
+                for item in line[5:].split(';'):
+                    e, _, rest = item.partition('|')
+                    if e == entity:
+                        return rest.rpartition('|')[2]
+    except OSError:
+        pass
+    return ''
+
+
 def main():
     if sys.argv[1:2] == ['loop']:
         return loop()
     cfg = config()
     if sys.argv[1:2] == ['act'] and len(sys.argv) > 2:
+        toggled = sys.argv[3] if sys.argv[2] == 'toggle' and len(sys.argv) > 3 else None
+        before = home_state(toggled) if toggled else None
         try:
             act(cfg, sys.argv[2], sys.argv[3:])
         except Exception:
-            pass                       # the refreshed feed shows whether it worked
+            toggled = None             # the refreshed feed shows whether it worked
+        if toggled:                    # a switch takes a moment: look again until it flipped (at most ~6 s)
+            for _ in range(8):
+                refresh(cfg)
+                if home_state(toggled) != before:
+                    return
+                time.sleep(0.75)
+            return
     refresh(cfg)
 
 

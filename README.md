@@ -96,7 +96,7 @@ Setup:
 2. Merge the `hooks` block from `claude-code/hooks.json` into `~/.claude/settings.json`, then open
    `/hooks` once in Claude Code (or restart it) so it picks them up.
 
-The hook writes `~/.claude/claude-modes/status.json`, which `NowPlaying.ps1` reads twice a second. The
+The hook writes `~/.claude/claude-modes/status.json`, which `NowPlaying.ps1` reads every second. The
 hooks run in the background, so Claude never waits for them. Without the hook the bubble stays hidden.
 
 ## How it works
@@ -104,10 +104,14 @@ hooks run in the background, so Claude never waits for them. Without the hook th
 - `DynamicIsland.ini`: the measures and meters. Everything inside the notch is clipped to its shape.
 - `@Resources\Island.lua`: the springs, fades, title marquee and visualizer smoothing. It hands its
   results to the meters as variables and redraws only when something changed. It is saved as UTF-16, which makes Rainmeter hand it text as Unicode (song titles in any script, symbols).
-- `@Resources\NowPlaying.ps1`: one background PowerShell that, twice a second, reads the media session (SMTC), battery (WMI), microphone
-  and camera use (registry) and the Claude Code status, and writes `NowPlaying.inc` for the skin.
-- `@Resources\cover.py`: on each new track reads the cover from the media session (WinRT) and renders
-  the rounded tiles and the blurred glow behind the player (Pillow).
+- `@Resources\NowPlaying.ps1`: one background PowerShell that, every second, reads battery (WMI), microphone
+  and camera use (registry) and the Claude Code status, and writes `NowPlaying.inc` for the skin. The
+  media session (SMTC) is only read when the cover watcher says it changed (and every 5 s to be safe).
+- `@Resources\cover.py watch`: a background Python that Windows tells about every music change. On a new
+  track it renders the rounded tiles and the blurred glow behind the player (Pillow) right away, then
+  wakes `NowPlaying.ps1`. Without it, `NowPlaying.ps1` polls twice a second and runs `cover.py` per track.
+- `tools\measure-island.ps1`: logs the CPU, RAM and file writes of Rainmeter and these helpers for a few
+  minutes, to compare before and after a change.
 
 ## Credits
 
